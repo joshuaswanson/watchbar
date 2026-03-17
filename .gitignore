@@ -1,0 +1,7 @@
+.venv/
+.cache/
+downloads/
+__pycache__/
+*.pyc
+*.vtt
+.claude/
