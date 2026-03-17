@@ -39,7 +39,12 @@ from AppKit import (
     NSView,
     NSViewController,
 )
-from Foundation import NSMakePoint, NSMakeSize, NSObject
+from Foundation import (
+    NSMakePoint,
+    NSMakeSize,
+    NSObject,
+    NSTimer,
+)
 from PyObjCTools import AppHelper
 
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,16 +61,24 @@ ROW_HEIGHT = 50
 HEADER_HEIGHT = 108  # search + tabs + refresh/sort
 
 SORT_DEFAULT = "Default"
-SORT_AZ = "A \u2192 Z"
-SORT_ZA = "Z \u2192 A"
-SORT_SHORTEST = "Shortest"
-SORT_LONGEST = "Longest"
-SORT_OPTIONS = [SORT_DEFAULT, SORT_AZ, SORT_ZA, SORT_SHORTEST, SORT_LONGEST]
+SORT_ALPHA = "Alphabetical"
+SORT_DURATION = "Duration"
+SORT_OPTIONS = [SORT_DEFAULT, SORT_ALPHA, SORT_DURATION]
 
 TAB_WATCH_LATER = 0
 TAB_DOWNLOADED = 1
 
+AUTO_REFRESH_INTERVAL = 300.0  # 5 minutes
+COOKIE_MAX_AGE = 1800  # 30 minutes
+
 _TRACKING_OPTS = 0x01 | 0x80 | 0x200
+
+# Key codes
+KEY_UP = 126
+KEY_DOWN = 125
+KEY_RETURN = 36
+KEY_DELETE = 51
+KEY_ESCAPE = 53
 
 
 # ---- Utilities ----
@@ -152,6 +165,12 @@ def download_thumbnail(video_id):
         return path
     except Exception:
         return None
+
+
+def _cookies_are_fresh():
+    if not os.path.exists(COOKIE_FILE):
+        return False
+    return time.time() - os.path.getmtime(COOKIE_FILE) < COOKIE_MAX_AGE
 
 
 def extract_cookies():
@@ -262,13 +281,41 @@ def download_video(video_id):
     return result.returncode == 0
 
 
+# ---- Popover content view (handles keyboard) ----
+
+
+class PopoverContentView(NSView):
+    _app = objc.ivar()
+
+    def acceptsFirstResponder(self):
+        return True
+
+    def keyDown_(self, event):
+        code = event.keyCode()
+        app = self._app
+        if app is None:
+            return
+        if code == KEY_ESCAPE:
+            app._popover.close()
+        elif code == KEY_UP:
+            app._move_selection(-1)
+        elif code == KEY_DOWN:
+            app._move_selection(1)
+        elif code == KEY_RETURN:
+            app._activate_selected()
+        elif code == KEY_DELETE:
+            app._delete_selected()
+        else:
+            objc.super(PopoverContentView, self).keyDown_(event)
+
+
 # ---- Video row view ----
 
 
 class VideoRowView(NSView):
     """A single video row. mode='wl' or 'dl' controls button behavior."""
 
-    def initWithVideo_app_mode_(self, video, app, mode):
+    def initWithVideo_app_mode_selected_(self, video, app, mode, selected):
         self = objc.super(VideoRowView, self).initWithFrame_(
             NSMakeRect(0, 0, PANEL_WIDTH, ROW_HEIGHT)
         )
@@ -278,6 +325,7 @@ class VideoRowView(NSView):
         self._app = app
         self._mode = mode  # "wl" or "dl"
         self._hover = False
+        self._selected = selected
 
         vid = video["id"]
         title = video["title"]
@@ -327,9 +375,12 @@ class VideoRowView(NSView):
         self._sub_label.setTextColor_(NSColor.secondaryLabelColor())
         self.addSubview_(self._sub_label)
 
-        # Action button (hover only): X to remove from WL or delete local
+        # Action buttons (hover only)
+        btn_x = PANEL_WIDTH - 38
+
+        # Remove/delete button
         self._action_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(PANEL_WIDTH - 38, 13, 24, 24)
+            NSMakeRect(btn_x, 13, 24, 24)
         )
         self._action_btn.setBordered_(False)
         self._action_btn.setHidden_(True)
@@ -353,6 +404,25 @@ class VideoRowView(NSView):
 
         self.addSubview_(self._action_btn)
 
+        # Open in browser button (hover only, WL tab)
+        self._browser_btn = None
+        if mode == "wl":
+            self._browser_btn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(btn_x - 28, 13, 24, 24)
+            )
+            self._browser_btn.setBordered_(False)
+            self._browser_btn.setHidden_(True)
+            browser_icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "safari", "Open in browser"
+            )
+            if browser_icon:
+                self._browser_btn.setImage_(browser_icon)
+                self._browser_btn.setTitle_("")
+            self._browser_btn.setToolTip_("Open in browser (removes from Watch Later)")
+            self._browser_btn.setTarget_(self)
+            self._browser_btn.setAction_("onOpenBrowser:")
+            self.addSubview_(self._browser_btn)
+
         return self
 
     def updateTrackingAreas(self):
@@ -372,20 +442,29 @@ class VideoRowView(NSView):
                     if sibling._hover:
                         sibling._hover = False
                         sibling._action_btn.setHidden_(True)
+                        if sibling._browser_btn:
+                            sibling._browser_btn.setHidden_(True)
                         sibling.setNeedsDisplay_(True)
         self._hover = True
         self._action_btn.setHidden_(False)
+        if self._browser_btn:
+            self._browser_btn.setHidden_(False)
         self.setNeedsDisplay_(True)
 
     def mouseExited_(self, event):
         self._hover = False
         self._action_btn.setHidden_(True)
+        if self._browser_btn:
+            self._browser_btn.setHidden_(True)
         self.setNeedsDisplay_(True)
 
     def mouseUp_(self, event):
         loc = self.convertPoint_fromView_(event.locationInWindow(), None)
+        # Check if click is in button area
         btn_x = self._action_btn.frame().origin.x
-        if not self._action_btn.isHidden() and loc.x >= btn_x:
+        browser_x = self._browser_btn.frame().origin.x if self._browser_btn else btn_x
+        min_btn_x = min(btn_x, browser_x)
+        if not self._action_btn.isHidden() and loc.x >= min_btn_x:
             return
         self._app.handleVideoClick_(self._video)
 
@@ -395,8 +474,14 @@ class VideoRowView(NSView):
     def onDelete_(self, sender):
         self._app.handleDeleteLocal_(self._video)
 
+    def onOpenBrowser_(self, sender):
+        self._app.handleOpenInBrowser_(self._video)
+
     def drawRect_(self, rect):
-        if self._hover:
+        if self._selected:
+            NSColor.controlAccentColor().colorWithAlphaComponent_(0.15).setFill()
+            NSBezierPath.fillRect_(self.bounds())
+        elif self._hover:
             NSColor.controlAccentColor().colorWithAlphaComponent_(0.08).setFill()
             NSBezierPath.fillRect_(self.bounds())
 
@@ -410,11 +495,14 @@ class WatchLaterApp(NSObject):
         self._videos = []
         self._set_video_ids = {}
         self._sort = SORT_DEFAULT
+        self._sort_ascending = True
         self._search = ""
         self._tab = TAB_WATCH_LATER
         self._loading = True
         self._popover = None
         self._status_item = None
+        self._selected_index = -1
+        self._scroll_view = None
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
         os.makedirs(THUMB_DIR, exist_ok=True)
@@ -426,9 +514,11 @@ class WatchLaterApp(NSObject):
         self._status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(-1)
         icon = NSImage.alloc().initWithContentsOfFile_(icon_path)
         icon.setTemplate_(True)
-        self._status_item.button().setImage_(icon)
-        self._status_item.button().setTarget_(self)
-        self._status_item.button().setAction_("togglePopover:")
+        btn = self._status_item.button()
+        btn.setImage_(icon)
+        btn.setImagePosition_(2)  # NSImageLeft
+        btn.setTarget_(self)
+        btn.setAction_("togglePopover:")
 
         self._popover = NSPopover.alloc().init()
         self._popover.setBehavior_(1)
@@ -436,20 +526,35 @@ class WatchLaterApp(NSObject):
 
         threading.Thread(target=self._do_load, daemon=True).start()
 
+        # Auto-refresh timer
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            AUTO_REFRESH_INTERVAL, self, "autoRefresh:", None, True
+        )
+
     def togglePopover_(self, sender):
         if self._popover.isShown():
             self._popover.close()
         else:
+            self._selected_index = -1
             self._build_content()
             self._popover.showRelativeToRect_ofView_preferredEdge_(
                 sender.bounds(), sender, 1
             )
+            # Make content view first responder for keyboard events
+            vc = self._popover.contentViewController()
+            if vc and vc.view() and vc.view().window():
+                vc.view().window().makeFirstResponder_(vc.view())
+
+    def autoRefresh_(self, timer):
+        if not self._loading and not self._popover.isShown():
+            threading.Thread(target=self._do_load, daemon=True).start()
 
     @objc.python_method
     def _do_load(self):
         self._loading = True
         try:
-            extract_cookies()
+            if not _cookies_are_fresh():
+                extract_cookies()
             self._videos = fetch_playlist()
             self._set_video_ids = fetch_set_video_ids()
             threads = []
@@ -464,13 +569,31 @@ class WatchLaterApp(NSObject):
         except Exception as e:
             print(f"Load error: {e}")
         self._loading = False
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "postLoadUpdate:", None, False
+        )
+
+    def postLoadUpdate_(self, sender):
+        self._update_badge()
         if self._popover and self._popover.isShown():
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "rebuildContent:", None, False
-            )
+            self._build_content()
+
+    @objc.python_method
+    def _update_badge(self):
+        btn = self._status_item.button()
+        count = len(self._videos)
+        btn.setTitle_(str(count) if count > 0 else "")
+        font = NSFont.monospacedDigitSystemFontOfSize_weight_(11, 0.0)
+        btn.setFont_(font)
 
     def rebuildContent_(self, sender):
         self._build_content()
+
+    @objc.python_method
+    def _get_visible_videos(self):
+        if self._tab == TAB_WATCH_LATER:
+            return self._filtered_sorted(self._videos)
+        return self._filtered_sorted(self._get_downloaded_videos())
 
     @objc.python_method
     def _get_downloaded_videos(self):
@@ -499,14 +622,13 @@ class WatchLaterApp(NSObject):
         if self._search:
             q = self._search.lower()
             vids = [v for v in vids if q in v["title"].lower()]
-        if self._sort == SORT_AZ:
-            return sorted(vids, key=lambda v: v["title"].lower())
-        if self._sort == SORT_ZA:
-            return sorted(vids, key=lambda v: v["title"].lower(), reverse=True)
-        if self._sort == SORT_SHORTEST:
-            return sorted(vids, key=lambda v: v["duration"])
-        if self._sort == SORT_LONGEST:
-            return sorted(vids, key=lambda v: v["duration"], reverse=True)
+        reverse = not self._sort_ascending
+        if self._sort == SORT_ALPHA:
+            return sorted(vids, key=lambda v: v["title"].lower(), reverse=reverse)
+        if self._sort == SORT_DURATION:
+            return sorted(vids, key=lambda v: v["duration"], reverse=reverse)
+        if reverse:
+            return list(reversed(vids))
         return list(vids)
 
     @objc.python_method
@@ -551,7 +673,7 @@ class WatchLaterApp(NSObject):
         header.addSubview_(refresh_btn)
 
         sort_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(PANEL_WIDTH - 145, 8, 135, 24), False
+            NSMakeRect(PANEL_WIDTH - 145, 8, 105, 24), False
         )
         sort_popup.setFont_(NSFont.systemFontOfSize_(12))
         for opt in SORT_OPTIONS:
@@ -560,6 +682,22 @@ class WatchLaterApp(NSObject):
         sort_popup.setTarget_(self)
         sort_popup.setAction_("onSortChanged:")
         header.addSubview_(sort_popup)
+
+        arrow_symbol = "arrow.up" if self._sort_ascending else "arrow.down"
+        dir_btn = NSButton.buttonWithImage_target_action_(
+            NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                arrow_symbol,
+                "Ascending" if self._sort_ascending else "Descending",
+            ),
+            self,
+            "onSortDirectionChanged:",
+        )
+        dir_btn.setFrame_(NSMakeRect(PANEL_WIDTH - 36, 8, 26, 24))
+        dir_btn.setBordered_(False)
+        dir_btn.setToolTip_(
+            "Ascending" if self._sort_ascending else "Descending"
+        )
+        header.addSubview_(dir_btn)
 
         # Divider
         divider = NSBox.alloc().initWithFrame_(
@@ -578,11 +716,19 @@ class WatchLaterApp(NSObject):
             label.setFont_(NSFont.systemFontOfSize_(13))
             label.setTextColor_(NSColor.secondaryLabelColor())
             rows.append(label)
-        elif self._tab == TAB_WATCH_LATER:
-            vids = self._filtered_sorted(self._videos)
+        else:
+            mode = "wl" if self._tab == TAB_WATCH_LATER else "dl"
+            vids = self._get_visible_videos()
             if not vids:
-                rows.append(NSView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_WIDTH, 15)))
-                empty_msg = "No matches" if self._search else "No videos in Watch Later"
+                rows.append(NSView.alloc().initWithFrame_(
+                    NSMakeRect(0, 0, PANEL_WIDTH, 15)
+                ))
+                if self._search:
+                    empty_msg = "No matches"
+                elif self._tab == TAB_WATCH_LATER:
+                    empty_msg = "No videos in Watch Later"
+                else:
+                    empty_msg = "No downloaded videos"
                 label = NSTextField.labelWithString_(empty_msg)
                 label.setFrame_(NSMakeRect(0, 0, PANEL_WIDTH, 30))
                 label.setAlignment_(1)
@@ -590,29 +736,19 @@ class WatchLaterApp(NSObject):
                 label.setTextColor_(NSColor.secondaryLabelColor())
                 rows.append(label)
             else:
-                for v in vids:
-                    row = VideoRowView.alloc().initWithVideo_app_mode_(v, self, "wl")
-                    rows.append(row)
-        else:  # TAB_DOWNLOADED
-            dl_vids = self._filtered_sorted(self._get_downloaded_videos())
-            if not dl_vids:
-                rows.append(NSView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_WIDTH, 15)))
-                empty_msg = "No matches" if self._search else "No downloaded videos"
-                label = NSTextField.labelWithString_(empty_msg)
-                label.setFrame_(NSMakeRect(0, 0, PANEL_WIDTH, 30))
-                label.setAlignment_(1)
-                label.setFont_(NSFont.systemFontOfSize_(13))
-                label.setTextColor_(NSColor.secondaryLabelColor())
-                rows.append(label)
-            else:
-                for v in dl_vids:
-                    row = VideoRowView.alloc().initWithVideo_app_mode_(v, self, "dl")
+                # Clamp selection
+                if self._selected_index >= len(vids):
+                    self._selected_index = len(vids) - 1
+                for i, v in enumerate(vids):
+                    selected = i == self._selected_index
+                    row = VideoRowView.alloc().initWithVideo_app_mode_selected_(
+                        v, self, mode, selected
+                    )
                     rows.append(row)
 
-        # Layout
+        # Layout - fixed height to avoid jarring resizes on tab switch
         rows_height = sum(r.frame().size.height for r in rows)
-        total_content_height = HEADER_HEIGHT + 1 + rows_height
-        visible_height = min(total_content_height, PANEL_MAX_HEIGHT)
+        visible_height = PANEL_MAX_HEIGHT
         scroll_area_height = visible_height - HEADER_HEIGHT - 1
 
         scroll_content = NSView.alloc().initWithFrame_(
@@ -632,10 +768,12 @@ class WatchLaterApp(NSObject):
         scroll_view.setHasHorizontalScroller_(False)
         scroll_view.setDrawsBackground_(False)
         scroll_view.setDocumentView_(scroll_content)
+        self._scroll_view = scroll_view
 
-        container = NSView.alloc().initWithFrame_(
+        container = PopoverContentView.alloc().initWithFrame_(
             NSMakeRect(0, 0, PANEL_WIDTH, visible_height)
         )
+        container._app = self
         scroll_view.setFrameOrigin_(NSMakePoint(0, 0))
         container.addSubview_(scroll_view)
         divider.setFrameOrigin_(NSMakePoint(0, scroll_area_height))
@@ -648,6 +786,55 @@ class WatchLaterApp(NSObject):
         self._popover.setContentViewController_(vc)
         self._popover.setContentSize_(NSMakeSize(PANEL_WIDTH, visible_height))
 
+        # Restore first responder for keyboard
+        if container.window():
+            container.window().makeFirstResponder_(container)
+
+        # Scroll to selected row
+        self._scroll_to_selected()
+
+    @objc.python_method
+    def _scroll_to_selected(self):
+        if self._selected_index < 0 or not self._scroll_view:
+            return
+        doc = self._scroll_view.documentView()
+        if not doc:
+            return
+        rows = [v for v in doc.subviews() if isinstance(v, VideoRowView)]
+        # Rows are laid out top-to-bottom but in flipped coordinates
+        # Index 0 is at the top (highest y)
+        if self._selected_index < len(rows):
+            row = rows[self._selected_index]
+            self._scroll_view.documentView().scrollRectToVisible_(row.frame())
+
+    @objc.python_method
+    def _move_selection(self, delta):
+        vids = self._get_visible_videos()
+        if not vids:
+            return
+        if self._selected_index < 0:
+            self._selected_index = 0 if delta > 0 else len(vids) - 1
+        else:
+            self._selected_index = max(0, min(len(vids) - 1,
+                                               self._selected_index + delta))
+        self._build_content()
+
+    @objc.python_method
+    def _activate_selected(self):
+        vids = self._get_visible_videos()
+        if 0 <= self._selected_index < len(vids):
+            self.handleVideoClick_(vids[self._selected_index])
+
+    @objc.python_method
+    def _delete_selected(self):
+        vids = self._get_visible_videos()
+        if 0 <= self._selected_index < len(vids):
+            video = vids[self._selected_index]
+            if self._tab == TAB_WATCH_LATER:
+                self.handleRemove_(video)
+            else:
+                self.handleDeleteLocal_(video)
+
     def onRefresh_(self, sender):
         if not self._loading:
             self._loading = True
@@ -656,14 +843,22 @@ class WatchLaterApp(NSObject):
 
     def onSearch_(self, sender):
         self._search = sender.stringValue()
+        self._selected_index = -1
         self._build_content()
 
     def onSortChanged_(self, sender):
         self._sort = sender.titleOfSelectedItem()
+        self._selected_index = -1
+        self._build_content()
+
+    def onSortDirectionChanged_(self, sender):
+        self._sort_ascending = not self._sort_ascending
+        self._selected_index = -1
         self._build_content()
 
     def onTabChanged_(self, sender):
         self._tab = sender.selectedSegment()
+        self._selected_index = -1
         self._build_content()
 
     def handleVideoClick_(self, video):
@@ -676,6 +871,11 @@ class WatchLaterApp(NSObject):
             threading.Thread(
                 target=self._do_download, args=(video,), daemon=True
             ).start()
+
+    def handleOpenInBrowser_(self, video):
+        url = f"https://www.youtube.com/watch?v={video['id']}"
+        subprocess.Popen(["open", url])
+        self._popover.close()
 
     def handleDeleteLocal_(self, video):
         local = find_local_file(video["id"])
@@ -695,6 +895,7 @@ class WatchLaterApp(NSObject):
             return
         self._videos = [v for v in self._videos if v["id"] != video["id"]]
         self._set_video_ids.pop(video["id"], None)
+        self._update_badge()
         self._build_content()
         threading.Thread(
             target=self._do_remove_bg, args=(video, svid), daemon=True
