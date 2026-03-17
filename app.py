@@ -159,7 +159,7 @@ def extract_cookies():
         os.remove(COOKIE_FILE)
     subprocess.run(
         [YT_DLP, "--cookies-from-browser", "safari",
-         "--cookies", COOKIE_FILE, "--skip-download",
+         "--cookies", COOKIE_FILE, "--skip-download", "--no-write-subs",
          "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
         capture_output=True,
     )
