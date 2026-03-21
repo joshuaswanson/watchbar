@@ -73,13 +73,6 @@ COOKIE_MAX_AGE = 1800  # 30 minutes
 
 _TRACKING_OPTS = 0x01 | 0x80 | 0x200
 
-# Key codes
-KEY_UP = 126
-KEY_DOWN = 125
-KEY_RETURN = 36
-KEY_DELETE = 51
-KEY_ESCAPE = 53
-
 
 # ---- Utilities ----
 
@@ -108,6 +101,28 @@ def _sapisidhash(cookies):
         f"{ts} {sapisid} https://www.youtube.com".encode()
     ).hexdigest()
     return f"SAPISIDHASH {ts}_{h}"
+
+
+_client_version_cache = {"version": None, "fetched": 0}
+
+
+def _get_client_version():
+    cache = _client_version_cache
+    if cache["version"] and time.time() - cache["fetched"] < 3600:
+        return cache["version"]
+    try:
+        req = urllib.request.Request("https://www.youtube.com")
+        req.add_header("User-Agent", "Mozilla/5.0")
+        resp = urllib.request.urlopen(req, context=_ssl_ctx(), timeout=10)
+        page = resp.read().decode()
+        m = re.search(r'"clientVersion":"([\d.]+)"', page)
+        if m:
+            cache["version"] = m.group(1)
+            cache["fetched"] = time.time()
+            return cache["version"]
+    except Exception:
+        pass
+    return "2.20260320.01.00"
 
 
 def _fmt_duration(seconds):
@@ -229,7 +244,7 @@ def remove_from_watch_later(video_id, set_video_id):
     cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
     payload = json.dumps({
         "context": {
-            "client": {"clientName": "WEB", "clientVersion": "2.20260314.00.00"}
+            "client": {"clientName": "WEB", "clientVersion": _get_client_version()}
         },
         "actions": [{
             "setVideoId": set_video_id,
@@ -281,41 +296,13 @@ def download_video(video_id):
     return result.returncode == 0
 
 
-# ---- Popover content view (handles keyboard) ----
-
-
-class PopoverContentView(NSView):
-    _app = objc.ivar()
-
-    def acceptsFirstResponder(self):
-        return True
-
-    def keyDown_(self, event):
-        code = event.keyCode()
-        app = self._app
-        if app is None:
-            return
-        if code == KEY_ESCAPE:
-            app._popover.close()
-        elif code == KEY_UP:
-            app._move_selection(-1)
-        elif code == KEY_DOWN:
-            app._move_selection(1)
-        elif code == KEY_RETURN:
-            app._activate_selected()
-        elif code == KEY_DELETE:
-            app._delete_selected()
-        else:
-            objc.super(PopoverContentView, self).keyDown_(event)
-
-
 # ---- Video row view ----
 
 
 class VideoRowView(NSView):
     """A single video row. mode='wl' or 'dl' controls button behavior."""
 
-    def initWithVideo_app_mode_selected_(self, video, app, mode, selected):
+    def initWithVideo_app_mode_(self, video, app, mode):
         self = objc.super(VideoRowView, self).initWithFrame_(
             NSMakeRect(0, 0, PANEL_WIDTH, ROW_HEIGHT)
         )
@@ -325,7 +312,6 @@ class VideoRowView(NSView):
         self._app = app
         self._mode = mode  # "wl" or "dl"
         self._hover = False
-        self._selected = selected
 
         vid = video["id"]
         title = video["title"]
@@ -344,10 +330,11 @@ class VideoRowView(NSView):
                 self._thumb.setImageScaling_(NSImageScaleProportionallyUpOrDown)
         self.addSubview_(self._thumb)
 
-        # Title
-        display_title = title if len(title) <= 40 else title[:37] + "..."
+        # Title (leave room for hover buttons: remove + browser)
+        title_width = PANEL_WIDTH - 158 if mode == "wl" else PANEL_WIDTH - 130
+        display_title = title if len(title) <= 35 else title[:32] + "..."
         self._title_label = NSTextField.labelWithString_(display_title)
-        self._title_label.setFrame_(NSMakeRect(78, 25, PANEL_WIDTH - 130, 18))
+        self._title_label.setFrame_(NSMakeRect(78, 25, title_width, 18))
         self._title_label.setFont_(NSFont.systemFontOfSize_(12.5))
         self._title_label.setTextColor_(NSColor.labelColor())
         self._title_label.setLineBreakMode_(5)
@@ -478,10 +465,7 @@ class VideoRowView(NSView):
         self._app.handleOpenInBrowser_(self._video)
 
     def drawRect_(self, rect):
-        if self._selected:
-            NSColor.controlAccentColor().colorWithAlphaComponent_(0.15).setFill()
-            NSBezierPath.fillRect_(self.bounds())
-        elif self._hover:
+        if self._hover:
             NSColor.controlAccentColor().colorWithAlphaComponent_(0.08).setFill()
             NSBezierPath.fillRect_(self.bounds())
 
@@ -501,8 +485,8 @@ class WatchLaterApp(NSObject):
         self._loading = True
         self._popover = None
         self._status_item = None
-        self._selected_index = -1
-        self._scroll_view = None
+        self._search_field = None
+        self._search_focused = False
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
         os.makedirs(THUMB_DIR, exist_ok=True)
@@ -535,15 +519,15 @@ class WatchLaterApp(NSObject):
         if self._popover.isShown():
             self._popover.close()
         else:
-            self._selected_index = -1
             self._build_content()
             self._popover.showRelativeToRect_ofView_preferredEdge_(
                 sender.bounds(), sender, 1
             )
-            # Make content view first responder for keyboard events
-            vc = self._popover.contentViewController()
-            if vc and vc.view() and vc.view().window():
-                vc.view().window().makeFirstResponder_(vc.view())
+            # Focus the search field so Cmd+A and other shortcuts work
+            if self._search_field:
+                w = self._search_field.window()
+                if w:
+                    w.makeFirstResponder_(self._search_field)
 
     def autoRefresh_(self, timer):
         if not self._loading and not self._popover.isShown():
@@ -575,7 +559,7 @@ class WatchLaterApp(NSObject):
 
     def postLoadUpdate_(self, sender):
         self._update_badge()
-        if self._popover and self._popover.isShown():
+        if self._popover and self._popover.isShown() and not self._search:
             self._build_content()
 
     @objc.python_method
@@ -647,8 +631,8 @@ class WatchLaterApp(NSObject):
         search_field.setStringValue_(self._search)
         search_field.setTarget_(self)
         search_field.setAction_("onSearch:")
-        search_field.setRefusesFirstResponder_(True)
         header.addSubview_(search_field)
+        self._search_field = search_field
 
         # Tab bar (middle)
         tabs = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
@@ -736,13 +720,9 @@ class WatchLaterApp(NSObject):
                 label.setTextColor_(NSColor.secondaryLabelColor())
                 rows.append(label)
             else:
-                # Clamp selection
-                if self._selected_index >= len(vids):
-                    self._selected_index = len(vids) - 1
-                for i, v in enumerate(vids):
-                    selected = i == self._selected_index
-                    row = VideoRowView.alloc().initWithVideo_app_mode_selected_(
-                        v, self, mode, selected
+                for v in vids:
+                    row = VideoRowView.alloc().initWithVideo_app_mode_(
+                        v, self, mode
                     )
                     rows.append(row)
 
@@ -751,10 +731,11 @@ class WatchLaterApp(NSObject):
         visible_height = PANEL_MAX_HEIGHT
         scroll_area_height = visible_height - HEADER_HEIGHT - 1
 
+        content_height = max(rows_height, scroll_area_height)
         scroll_content = NSView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, PANEL_WIDTH, rows_height)
+            NSMakeRect(0, 0, PANEL_WIDTH, content_height)
         )
-        y = rows_height
+        y = content_height
         for row in rows:
             h = row.frame().size.height
             y -= h
@@ -768,12 +749,9 @@ class WatchLaterApp(NSObject):
         scroll_view.setHasHorizontalScroller_(False)
         scroll_view.setDrawsBackground_(False)
         scroll_view.setDocumentView_(scroll_content)
-        self._scroll_view = scroll_view
-
-        container = PopoverContentView.alloc().initWithFrame_(
+        container = NSView.alloc().initWithFrame_(
             NSMakeRect(0, 0, PANEL_WIDTH, visible_height)
         )
-        container._app = self
         scroll_view.setFrameOrigin_(NSMakePoint(0, 0))
         container.addSubview_(scroll_view)
         divider.setFrameOrigin_(NSMakePoint(0, scroll_area_height))
@@ -786,54 +764,15 @@ class WatchLaterApp(NSObject):
         self._popover.setContentViewController_(vc)
         self._popover.setContentSize_(NSMakeSize(PANEL_WIDTH, visible_height))
 
-        # Restore first responder for keyboard
-        if container.window():
-            container.window().makeFirstResponder_(container)
-
-        # Scroll to selected row
-        self._scroll_to_selected()
-
-    @objc.python_method
-    def _scroll_to_selected(self):
-        if self._selected_index < 0 or not self._scroll_view:
-            return
-        doc = self._scroll_view.documentView()
-        if not doc:
-            return
-        rows = [v for v in doc.subviews() if isinstance(v, VideoRowView)]
-        # Rows are laid out top-to-bottom but in flipped coordinates
-        # Index 0 is at the top (highest y)
-        if self._selected_index < len(rows):
-            row = rows[self._selected_index]
-            self._scroll_view.documentView().scrollRectToVisible_(row.frame())
-
-    @objc.python_method
-    def _move_selection(self, delta):
-        vids = self._get_visible_videos()
-        if not vids:
-            return
-        if self._selected_index < 0:
-            self._selected_index = 0 if delta > 0 else len(vids) - 1
-        else:
-            self._selected_index = max(0, min(len(vids) - 1,
-                                               self._selected_index + delta))
-        self._build_content()
-
-    @objc.python_method
-    def _activate_selected(self):
-        vids = self._get_visible_videos()
-        if 0 <= self._selected_index < len(vids):
-            self.handleVideoClick_(vids[self._selected_index])
-
-    @objc.python_method
-    def _delete_selected(self):
-        vids = self._get_visible_videos()
-        if 0 <= self._selected_index < len(vids):
-            video = vids[self._selected_index]
-            if self._tab == TAB_WATCH_LATER:
-                self.handleRemove_(video)
-            else:
-                self.handleDeleteLocal_(video)
+        # Restore search field focus if it was active before rebuild
+        if self._search_focused and self._search_field:
+            w = self._search_field.window()
+            if w:
+                w.makeFirstResponder_(self._search_field)
+                # Place cursor at end of text
+                editor = self._search_field.currentEditor()
+                if editor:
+                    editor.setSelectedRange_((len(self._search), 0))
 
     def onRefresh_(self, sender):
         if not self._loading:
@@ -842,23 +781,24 @@ class WatchLaterApp(NSObject):
             threading.Thread(target=self._do_load, daemon=True).start()
 
     def onSearch_(self, sender):
-        self._search = sender.stringValue()
-        self._selected_index = -1
+        new_search = sender.stringValue()
+        if new_search == self._search:
+            return
+        self._search = new_search
+        self._search_focused = True
         self._build_content()
+        self._search_focused = False
 
     def onSortChanged_(self, sender):
         self._sort = sender.titleOfSelectedItem()
-        self._selected_index = -1
         self._build_content()
 
     def onSortDirectionChanged_(self, sender):
         self._sort_ascending = not self._sort_ascending
-        self._selected_index = -1
         self._build_content()
 
     def onTabChanged_(self, sender):
         self._tab = sender.selectedSegment()
-        self._selected_index = -1
         self._build_content()
 
     def handleVideoClick_(self, video):
