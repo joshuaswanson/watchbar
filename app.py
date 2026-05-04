@@ -200,16 +200,17 @@ def extract_cookies():
     if os.path.exists(COOKIE_FILE):
         os.remove(COOKIE_FILE)
     subprocess.run(
-        [YT_DLP, "--cookies-from-browser", "safari",
+        [YT_DLP, "--ignore-config", "--cookies-from-browser", "safari",
          "--cookies", COOKIE_FILE, "--skip-download", "--no-write-subs",
+         "--no-write-auto-subs",
          "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
-        capture_output=True,
+        capture_output=True, cwd=CACHE_DIR,
     )
 
 
 def fetch_playlist():
     result = subprocess.run(
-        [YT_DLP, "--cookies-from-browser", "safari",
+        [YT_DLP, "--ignore-config", "--cookies-from-browser", "safari",
          "--flat-playlist", "--print", "%(id)s\t%(title)s\t%(duration)s",
          "https://www.youtube.com/playlist?list=WL"],
         capture_output=True, text=True,
@@ -296,7 +297,7 @@ def find_local_file(video_id):
 
 def download_video(video_id):
     result = subprocess.run(
-        [YT_DLP, "--cookies-from-browser", "safari",
+        [YT_DLP, "--ignore-config", "--cookies-from-browser", "safari",
          "--write-auto-subs", "--sub-langs", "en.*", "--embed-subs",
          "-o", os.path.join(DOWNLOAD_DIR, "%(title)s [%(id)s].%(ext)s"),
          f"https://www.youtube.com/watch?v={video_id}"],
