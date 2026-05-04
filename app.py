@@ -32,7 +32,6 @@ from AppKit import (
     NSScrollView,
     NSSearchField,
     NSSegmentedControl,
-    NSSegmentStyleAutomatic,
     NSStatusBar,
     NSTextField,
     NSTrackingArea,
@@ -57,7 +56,7 @@ YT_DLP = "yt-dlp"
 
 PANEL_WIDTH = 380
 PANEL_MAX_HEIGHT = 500
-ROW_HEIGHT = 50
+ROW_HEIGHT = 64
 HEADER_HEIGHT = 108  # search + tabs + refresh/sort
 
 SORT_DEFAULT = "Default"
@@ -71,7 +70,16 @@ TAB_DOWNLOADED = 1
 AUTO_REFRESH_INTERVAL = 300.0  # 5 minutes
 COOKIE_MAX_AGE = 1800  # 30 minutes
 
-_TRACKING_OPTS = 0x01 | 0x80 | 0x200
+# AppKit enum values, named for readability.
+NS_LINE_BREAK_TRUNCATING_TAIL = 4
+NS_TEXT_ALIGNMENT_CENTER = 1
+NS_IMAGE_LEFT = 2
+NS_BITMAP_FILE_TYPE_PNG = 4
+NS_POPOVER_BEHAVIOR_TRANSIENT = 1
+NS_BOX_SEPARATOR = 2
+NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY = 1
+# NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+NS_TRACKING_OPTS = 0x01 | 0x80 | 0x200
 
 
 # ---- Utilities ----
@@ -161,7 +169,7 @@ def create_menubar_icon():
 
     tiff = img.TIFFRepresentation()
     rep = NSBitmapImageRep.imageRepWithData_(tiff)
-    png = rep.representationUsingType_properties_(4, {})
+    png = rep.representationUsingType_properties_(NS_BITMAP_FILE_TYPE_PNG, {})
     png.writeToFile_atomically_(ICON_PATH, True)
     return ICON_PATH
 
@@ -289,10 +297,20 @@ def find_local_file(video_id):
 def download_video(video_id):
     result = subprocess.run(
         [YT_DLP, "--cookies-from-browser", "safari",
+         "--write-auto-subs", "--sub-langs", "en.*", "--embed-subs",
          "-o", os.path.join(DOWNLOAD_DIR, "%(title)s [%(id)s].%(ext)s"),
          f"https://www.youtube.com/watch?v={video_id}"],
         capture_output=True, text=True,
     )
+    if result.returncode == 0:
+        # yt-dlp keeps the standalone .vtt files even after embedding;
+        # remove them so only the mp4 with embedded captions remains.
+        for f in os.listdir(DOWNLOAD_DIR):
+            if f"[{video_id}]" in f and f.endswith(".vtt"):
+                try:
+                    os.remove(os.path.join(DOWNLOAD_DIR, f))
+                except OSError:
+                    pass
     return result.returncode == 0
 
 
@@ -320,7 +338,7 @@ class VideoRowView(NSView):
 
         # Thumbnail
         self._thumb = NSImageView.alloc().initWithFrame_(
-            NSMakeRect(10, 5, 60, 40)
+            NSMakeRect(10, 12, 60, 40)
         )
         thumb_path = os.path.join(THUMB_DIR, f"{vid}.jpg")
         if os.path.exists(thumb_path):
@@ -330,14 +348,14 @@ class VideoRowView(NSView):
                 self._thumb.setImageScaling_(NSImageScaleProportionallyUpOrDown)
         self.addSubview_(self._thumb)
 
-        # Title (leave room for hover buttons: remove + browser)
-        title_width = PANEL_WIDTH - 158 if mode == "wl" else PANEL_WIDTH - 130
-        display_title = title if len(title) <= 35 else title[:32] + "..."
-        self._title_label = NSTextField.labelWithString_(display_title)
-        self._title_label.setFrame_(NSMakeRect(78, 25, title_width, 18))
+        # Title — full width by default, shrinks on hover to make room for buttons.
+        self._title_full_width = PANEL_WIDTH - 108
+        self._title_hover_width = PANEL_WIDTH - 158 if mode == "wl" else PANEL_WIDTH - 130
+        self._title_label = NSTextField.labelWithString_(title)
+        self._title_label.setFrame_(NSMakeRect(78, 32, self._title_full_width, 18))
         self._title_label.setFont_(NSFont.systemFontOfSize_(12.5))
         self._title_label.setTextColor_(NSColor.labelColor())
-        self._title_label.setLineBreakMode_(5)
+        self._title_label.setLineBreakMode_(NS_LINE_BREAK_TRUNCATING_TAIL)
         self.addSubview_(self._title_label)
 
         # Subtitle
@@ -345,7 +363,7 @@ class VideoRowView(NSView):
         if mode == "wl" and local:
             # Green checkmark for downloaded indicator on WL tab
             dl_icon = NSImageView.alloc().initWithFrame_(
-                NSMakeRect(78, 7, 14, 14)
+                NSMakeRect(78, 14, 14, 14)
             )
             check_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
                 "checkmark.circle.fill", "Downloaded"
@@ -357,7 +375,7 @@ class VideoRowView(NSView):
             sub_x = 95
 
         self._sub_label = NSTextField.labelWithString_(duration)
-        self._sub_label.setFrame_(NSMakeRect(sub_x, 7, PANEL_WIDTH - 140, 15))
+        self._sub_label.setFrame_(NSMakeRect(sub_x, 14, PANEL_WIDTH - 140, 15))
         self._sub_label.setFont_(NSFont.systemFontOfSize_(11))
         self._sub_label.setTextColor_(NSColor.secondaryLabelColor())
         self.addSubview_(self._sub_label)
@@ -367,7 +385,7 @@ class VideoRowView(NSView):
 
         # Remove/delete button
         self._action_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(btn_x, 13, 24, 24)
+            NSMakeRect(btn_x, 20, 24, 24)
         )
         self._action_btn.setBordered_(False)
         self._action_btn.setHidden_(True)
@@ -399,7 +417,7 @@ class VideoRowView(NSView):
         self._browser_btn = None
         if mode == "wl":
             self._browser_btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(btn_x - 28, 13, 24, 24)
+                NSMakeRect(btn_x - 28, 20, 24, 24)
             )
             self._browser_btn.setBordered_(False)
             self._browser_btn.setHidden_(True)
@@ -421,7 +439,7 @@ class VideoRowView(NSView):
         for ta in list(self.trackingAreas()):
             self.removeTrackingArea_(ta)
         ta = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
-            self.bounds(), _TRACKING_OPTS, self, None
+            self.bounds(), NS_TRACKING_OPTS, self, None
         )
         self.addTrackingArea_(ta)
 
@@ -435,11 +453,20 @@ class VideoRowView(NSView):
                         sibling._action_btn.setHidden_(True)
                         if sibling._browser_btn:
                             sibling._browser_btn.setHidden_(True)
+                        f = sibling._title_label.frame()
+                        sibling._title_label.setFrame_(
+                            NSMakeRect(f.origin.x, f.origin.y,
+                                       sibling._title_full_width, f.size.height)
+                        )
                         sibling.setNeedsDisplay_(True)
         self._hover = True
         self._action_btn.setHidden_(False)
         if self._browser_btn:
             self._browser_btn.setHidden_(False)
+        f = self._title_label.frame()
+        self._title_label.setFrame_(
+            NSMakeRect(f.origin.x, f.origin.y, self._title_hover_width, f.size.height)
+        )
         self.setNeedsDisplay_(True)
 
     def mouseExited_(self, event):
@@ -447,6 +474,10 @@ class VideoRowView(NSView):
         self._action_btn.setHidden_(True)
         if self._browser_btn:
             self._browser_btn.setHidden_(True)
+        f = self._title_label.frame()
+        self._title_label.setFrame_(
+            NSMakeRect(f.origin.x, f.origin.y, self._title_full_width, f.size.height)
+        )
         self.setNeedsDisplay_(True)
 
     def mouseUp_(self, event):
@@ -469,9 +500,8 @@ class VideoRowView(NSView):
         self._app.handleOpenInBrowser_(self._video)
 
     def drawRect_(self, rect):
-        if self._hover:
-            NSColor.controlAccentColor().colorWithAlphaComponent_(0.08).setFill()
-            NSBezierPath.fillRect_(self.bounds())
+        NSColor.separatorColor().setFill()
+        NSBezierPath.fillRect_(NSMakeRect(78, 0, PANEL_WIDTH - 78, 1))
 
 
 # ---- Main app ----
@@ -504,12 +534,12 @@ class WatchLaterApp(NSObject):
         icon.setTemplate_(True)
         btn = self._status_item.button()
         btn.setImage_(icon)
-        btn.setImagePosition_(2)  # NSImageLeft
+        btn.setImagePosition_(NS_IMAGE_LEFT)
         btn.setTarget_(self)
         btn.setAction_("togglePopover:")
 
         self._popover = NSPopover.alloc().init()
-        self._popover.setBehavior_(1)
+        self._popover.setBehavior_(NS_POPOVER_BEHAVIOR_TRANSIENT)
         self._popover.setAnimates_(True)
 
         threading.Thread(target=self._do_load, daemon=True).start()
@@ -572,9 +602,6 @@ class WatchLaterApp(NSObject):
         btn.setTitle_(str(count) if count > 0 else "")
         font = NSFont.monospacedDigitSystemFontOfSize_weight_(11, 0.0)
         btn.setFont_(font)
-
-    def rebuildContent_(self, sender):
-        self._build_content()
 
     @objc.python_method
     def _get_visible_videos(self):
@@ -690,7 +717,7 @@ class WatchLaterApp(NSObject):
         divider = NSBox.alloc().initWithFrame_(
             NSMakeRect(0, 0, PANEL_WIDTH, 1)
         )
-        divider.setBoxType_(2)
+        divider.setBoxType_(NS_BOX_SEPARATOR)
 
         # Build rows based on active tab
         rows = []
@@ -699,7 +726,7 @@ class WatchLaterApp(NSObject):
             rows.append(spacer)
             label = NSTextField.labelWithString_("Loading...")
             label.setFrame_(NSMakeRect(0, 0, PANEL_WIDTH, 30))
-            label.setAlignment_(1)
+            label.setAlignment_(NS_TEXT_ALIGNMENT_CENTER)
             label.setFont_(NSFont.systemFontOfSize_(13))
             label.setTextColor_(NSColor.secondaryLabelColor())
             rows.append(label)
@@ -718,7 +745,7 @@ class WatchLaterApp(NSObject):
                     empty_msg = "No downloaded videos"
                 label = NSTextField.labelWithString_(empty_msg)
                 label.setFrame_(NSMakeRect(0, 0, PANEL_WIDTH, 30))
-                label.setAlignment_(1)
+                label.setAlignment_(NS_TEXT_ALIGNMENT_CENTER)
                 label.setFont_(NSFont.systemFontOfSize_(13))
                 label.setTextColor_(NSColor.secondaryLabelColor())
                 rows.append(label)
@@ -767,15 +794,19 @@ class WatchLaterApp(NSObject):
         self._popover.setContentViewController_(vc)
         self._popover.setContentSize_(NSMakeSize(PANEL_WIDTH, visible_height))
 
-        # Restore search field focus if it was active before rebuild
-        if self._search_focused and self._search_field:
+        # Restore search field focus if it was active before rebuild;
+        # otherwise actively unfocus so the rebuilt search field doesn't
+        # become first responder by default.
+        if self._search_field:
             w = self._search_field.window()
             if w:
-                w.makeFirstResponder_(self._search_field)
-                # Place cursor at end of text
-                editor = self._search_field.currentEditor()
-                if editor:
-                    editor.setSelectedRange_((len(self._search), 0))
+                if self._search_focused:
+                    w.makeFirstResponder_(self._search_field)
+                    editor = self._search_field.currentEditor()
+                    if editor:
+                        editor.setSelectedRange_((len(self._search), 0))
+                else:
+                    w.makeFirstResponder_(None)
 
     def onRefresh_(self, sender):
         if not self._loading:
@@ -861,7 +892,9 @@ class WatchLaterApp(NSObject):
 
 
 if __name__ == "__main__":
-    NSApplication.sharedApplication().setActivationPolicy_(1)
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+    )
     app = WatchLaterApp.alloc().init()
     app.setup()
     AppHelper.runEventLoop()

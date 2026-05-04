@@ -10,10 +10,9 @@ A macOS menubar app for managing your YouTube Watch Later playlist.
 - Browse your Watch Later playlist from the menubar with video count badge
 - Search and filter videos by title
 - Sort by alphabetical, duration, or default order with ascending/descending toggle
-- Download and play videos locally (no ads, no autoplay)
+- Download and play videos locally (no ads, no autoplay), with English captions embedded into the mp4
 - Open videos in browser
 - Remove videos from Watch Later
-- Keyboard navigation (arrow keys, Enter to play, Delete to remove)
 - Auto-refresh every 5 minutes
 - Thumbnails and duration display
 - Tab view for Watch Later and downloaded videos
@@ -40,24 +39,19 @@ The first run creates a virtual environment and installs dependencies automatica
 
 Once running, a small video icon appears in your menubar with a video count. Click it to open the popover with your Watch Later playlist.
 
-### Mouse
-
 - **Click** a video to download and play locally
-- **Hover** to reveal action buttons: open in browser (safari icon) and remove (X)
-
-### Keyboard
-
-| Key     | Action                       |
-| ------- | ---------------------------- |
-| Up/Down | Navigate videos              |
-| Enter   | Download/play selected video |
-| Delete  | Remove selected video        |
-| Escape  | Close popover                |
-
-### Sorting
-
-Use the dropdown to pick a sort field (Default, Alphabetical, Duration) and the arrow button to toggle ascending/descending.
+- **Hover** a row to reveal action buttons: open in browser (Safari icon) and remove from Watch Later / delete download (trash icon)
+- Switch between **Watch Later** and **Downloaded** tabs to see your playlist or local files
+- Use the search field to filter by title
+- Use the sort dropdown (Default, Alphabetical, Duration) and the arrow button to change order and direction
+- Press the refresh button to re-fetch the playlist immediately
 
 ## How it works
 
-Watchbar uses yt-dlp to extract authentication cookies from Safari and fetches your Watch Later playlist via YouTube's InnerTube API. The native macOS UI is built with PyObjC. Videos can be downloaded locally via yt-dlp for offline playback.
+Watchbar uses yt-dlp to extract authentication cookies from Safari and fetches your Watch Later playlist via YouTube's InnerTube API. The native macOS UI is built with PyObjC. Videos can be downloaded locally via yt-dlp for offline playback, with English auto-captions embedded into each mp4.
+
+## Support
+
+If you find this useful, [buy me a coffee](https://buymeacoffee.com/swanson).
+
+<img src="assets/bmc_qr.png" alt="Buy Me a Coffee QR" width="200">
