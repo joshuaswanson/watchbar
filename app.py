@@ -373,8 +373,12 @@ class VideoRowView(NSView):
         self._action_btn.setHidden_(True)
 
         if mode == "wl":
-            self._action_btn.setTitle_("\u2715")
-            self._action_btn.setFont_(NSFont.systemFontOfSize_(13))
+            icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "trash", "Remove from Watch Later"
+            )
+            if icon:
+                self._action_btn.setImage_(icon)
+                self._action_btn.setTitle_("")
             self._action_btn.setToolTip_("Remove from Watch Later")
             self._action_btn.setTarget_(self)
             self._action_btn.setAction_("onRemove:")
@@ -405,7 +409,7 @@ class VideoRowView(NSView):
             if browser_icon:
                 self._browser_btn.setImage_(browser_icon)
                 self._browser_btn.setTitle_("")
-            self._browser_btn.setToolTip_("Open in browser (removes from Watch Later)")
+            self._browser_btn.setToolTip_("Open in browser")
             self._browser_btn.setTarget_(self)
             self._browser_btn.setAction_("onOpenBrowser:")
             self.addSubview_(self._browser_btn)
@@ -523,11 +527,10 @@ class WatchLaterApp(NSObject):
             self._popover.showRelativeToRect_ofView_preferredEdge_(
                 sender.bounds(), sender, 1
             )
-            # Focus the search field so Cmd+A and other shortcuts work
             if self._search_field:
                 w = self._search_field.window()
                 if w:
-                    w.makeFirstResponder_(self._search_field)
+                    w.makeFirstResponder_(None)
 
     def autoRefresh_(self, timer):
         if not self._loading and not self._popover.isShown():
@@ -807,7 +810,6 @@ class WatchLaterApp(NSObject):
             subprocess.Popen(["open", local])
         else:
             self._popover.close()
-            self._send_notif("Downloading...", video["title"][:50])
             threading.Thread(
                 target=self._do_download, args=(video,), daemon=True
             ).start()
@@ -825,13 +827,12 @@ class WatchLaterApp(NSObject):
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.startswith(base) and f != os.path.basename(local):
                     os.remove(os.path.join(DOWNLOAD_DIR, f))
-            self._send_notif("Deleted", video["title"][:50])
             self._build_content()
 
     def handleRemove_(self, video):
         svid = self._set_video_ids.get(video["id"])
         if not svid:
-            self._send_notif("Error", "Entry not found. Try refreshing.")
+            print("[remove] Entry not found. Try refreshing.")
             return
         self._videos = [v for v in self._videos if v["id"] != video["id"]]
         self._set_video_ids.pop(video["id"], None)
@@ -847,30 +848,16 @@ class WatchLaterApp(NSObject):
             local = find_local_file(video["id"])
             if local:
                 subprocess.Popen(["open", local])
-            self._send_notif("Ready", video["title"][:50])
         else:
-            self._send_notif("Failed", video["title"][:50])
+            print(f"[download] Failed: {video['title'][:50]}")
 
     @objc.python_method
     def _do_remove_bg(self, video, svid):
         try:
-            if remove_from_watch_later(video["id"], svid):
-                self._send_notif("Removed", video["title"][:50])
-            else:
-                self._send_notif("Failed", "Could not remove video")
+            if not remove_from_watch_later(video["id"], svid):
+                print(f"[remove] Failed: {video['title'][:50]}")
         except Exception as e:
-            self._send_notif("Error", str(e)[:80])
-
-    @objc.python_method
-    def _send_notif(self, subtitle, message):
-        try:
-            subprocess.run(
-                ["osascript", "-e",
-                 f'display notification "{message}" with title "Watch Later" subtitle "{subtitle}"'],
-                capture_output=True,
-            )
-        except Exception:
-            pass
+            print(f"[remove] Error: {e}")
 
 
 if __name__ == "__main__":
