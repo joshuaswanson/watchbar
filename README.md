@@ -21,19 +21,27 @@ A macOS menubar app for managing your YouTube Watch Later playlist.
 
 - macOS
 - Python 3.13+
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (installed globally)
-- Safari (used for YouTube authentication cookies)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) on `PATH` (e.g. `brew install yt-dlp`)
+- Safari, signed into your YouTube/Google account
 
 ## Setup
 
-```bash
-git clone https://github.com/joshuaswanson/watchbar.git
-cd watchbar
-chmod +x run.sh
-./run.sh
-```
+1. **Sign into YouTube in Safari.** Watchbar reads YouTube auth cookies directly from Safari's cookie store via `yt-dlp --cookies-from-browser safari` — there's no separate login flow inside the app. If you're not signed in there, the playlist will be empty.
 
-The first run creates a virtual environment and installs dependencies automatically.
+2. **Grant Full Disk Access to Terminal** (System Settings → Privacy & Security → Full Disk Access). macOS protects Safari's cookie database, so without this, `yt-dlp` cannot read your cookies and the app will show no videos. Add whichever terminal you launch `run.sh` from (Terminal.app, iTerm, etc.).
+
+3. **Clone and run:**
+
+   ```bash
+   git clone https://github.com/joshuaswanson/watchbar.git
+   cd watchbar
+   chmod +x run.sh
+   ./run.sh
+   ```
+
+   The first run creates a virtual environment and installs dependencies automatically. To launch from Finder later, double-click `Watchbar.command`.
+
+Cookies are re-extracted from Safari roughly every 30 minutes, so as long as you stay signed into YouTube in Safari, the app keeps working without manual re-auth. If you sign out of Safari, Watchbar loses access too.
 
 ## Usage
 
