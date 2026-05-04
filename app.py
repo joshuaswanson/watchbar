@@ -310,6 +310,10 @@ def download_video(video_id):
     result = subprocess.run(
         [YT_DLP, "--ignore-config", "--ignore-errors",
          "--cookies-from-browser", "safari",
+         # Prefer H.264 video + AAC audio so the resulting mp4 plays in
+         # QuickTime. yt-dlp's default picks AV1 + Opus by bitrate, which
+         # QuickTime won't decode.
+         "-f", "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/b[ext=mp4]/bv*+ba/b",
          "--write-auto-subs", "--sub-langs", "en.*", "--embed-subs",
          "--merge-output-format", "mp4",
          "-o", os.path.join(DOWNLOAD_DIR, "%(title)s [%(id)s].%(ext)s"),
