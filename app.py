@@ -295,24 +295,34 @@ def find_local_file(video_id):
     return None
 
 
+def _cleanup_orphan_subs(video_id):
+    for f in os.listdir(DOWNLOAD_DIR):
+        if f"[{video_id}]" in f and f.endswith(".vtt"):
+            try:
+                os.remove(os.path.join(DOWNLOAD_DIR, f))
+            except OSError:
+                pass
+
+
 def download_video(video_id):
+    # --ignore-errors so a failed subtitle fetch (e.g. HTTP 429 on one of
+    # several language variants) doesn't abort the actual video download.
     result = subprocess.run(
-        [YT_DLP, "--ignore-config", "--cookies-from-browser", "safari",
+        [YT_DLP, "--ignore-config", "--ignore-errors",
+         "--cookies-from-browser", "safari",
          "--write-auto-subs", "--sub-langs", "en.*", "--embed-subs",
+         "--merge-output-format", "mp4",
          "-o", os.path.join(DOWNLOAD_DIR, "%(title)s [%(id)s].%(ext)s"),
          f"https://www.youtube.com/watch?v={video_id}"],
         capture_output=True, text=True,
     )
-    if result.returncode == 0:
-        # yt-dlp keeps the standalone .vtt files even after embedding;
-        # remove them so only the mp4 with embedded captions remains.
-        for f in os.listdir(DOWNLOAD_DIR):
-            if f"[{video_id}]" in f and f.endswith(".vtt"):
-                try:
-                    os.remove(os.path.join(DOWNLOAD_DIR, f))
-                except OSError:
-                    pass
-    return result.returncode == 0
+    succeeded = result.returncode == 0 and find_local_file(video_id) is not None
+    _cleanup_orphan_subs(video_id)
+    if not succeeded:
+        print(f"[download] yt-dlp failed for {video_id}")
+        if result.stderr:
+            print(result.stderr.strip()[-2000:])
+    return succeeded
 
 
 # ---- Video row view ----
