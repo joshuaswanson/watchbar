@@ -6,11 +6,13 @@ import http.cookiejar
 import json
 import os
 import re
+import shutil
 import ssl
 import subprocess
 import threading
 import time
 import urllib.request
+from datetime import date
 
 import objc
 from AppKit import (
@@ -29,6 +31,7 @@ from AppKit import (
     NSMakeRect,
     NSPopover,
     NSPopUpButton,
+    NSProgressIndicator,
     NSScrollView,
     NSSearchField,
     NSSegmentedControl,
@@ -53,6 +56,10 @@ COOKIE_FILE = os.path.join(CACHE_DIR, "cookies.txt")
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbnails")
 ICON_PATH = os.path.join(CACHE_DIR, "yt_icon.png")
 YT_DLP = "yt-dlp"
+FFMPEG = "ffmpeg"
+# yt-dlp older than this is proactively refreshed on launch. YouTube breaks
+# older builds every few weeks, so we stay ahead of its own 90-day warning.
+YTDLP_STALE_DAYS = 30
 
 PANEL_WIDTH = 380
 PANEL_MAX_HEIGHT = 500
@@ -77,6 +84,8 @@ NS_IMAGE_LEFT = 2
 NS_BITMAP_FILE_TYPE_PNG = 4
 NS_POPOVER_BEHAVIOR_TRANSIENT = 1
 NS_BOX_SEPARATOR = 2
+NS_PROGRESS_STYLE_SPINNING = 1
+NS_CONTROL_SIZE_SMALL = 1
 NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY = 1
 # NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
 NS_TRACKING_OPTS = 0x01 | 0x80 | 0x200
@@ -204,7 +213,7 @@ def extract_cookies():
          "--cookies", COOKIE_FILE, "--skip-download", "--no-write-subs",
          "--no-write-auto-subs",
          "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
-        capture_output=True, cwd=CACHE_DIR,
+        capture_output=True, cwd=CACHE_DIR, timeout=60,
     )
 
 
@@ -213,7 +222,7 @@ def fetch_playlist():
         [YT_DLP, "--ignore-config", "--cookies-from-browser", "safari",
          "--flat-playlist", "--print", "%(id)s\t%(title)s\t%(duration)s",
          "https://www.youtube.com/playlist?list=WL"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=60,
     )
     videos = []
     for line in result.stdout.strip().split("\n"):
@@ -236,7 +245,7 @@ def fetch_set_video_ids():
     req = urllib.request.Request("https://www.youtube.com/playlist?list=WL")
     req.add_header("Cookie", cookie_header)
     req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
-    resp = urllib.request.urlopen(req, context=_ssl_ctx())
+    resp = urllib.request.urlopen(req, context=_ssl_ctx(), timeout=20)
     page = resp.read().decode("utf-8")
     mappings = {}
     for m in re.finditer(r'"playlistVideoRenderer":\{"videoId":"([^"]+)"', page):
@@ -273,7 +282,7 @@ def remove_from_watch_later(video_id, set_video_id):
     req.add_header("X-Origin", "https://www.youtube.com")
     req.add_header("User-Agent", "Mozilla/5.0")
     try:
-        resp = urllib.request.urlopen(req, context=_ssl_ctx())
+        resp = urllib.request.urlopen(req, context=_ssl_ctx(), timeout=20)
         body = resp.read().decode()
     except urllib.error.HTTPError as e:
         print(f"[remove] HTTP {e.code}: {e.read().decode()[:500]}")
@@ -289,8 +298,11 @@ def remove_from_watch_later(video_id, set_video_id):
 def find_local_file(video_id):
     if not os.path.isdir(DOWNLOAD_DIR):
         return None
+    # Match only the final merged file (…[id].mp4), never yt-dlp's per-stream
+    # intermediates like …[id].f137.mp4, which linger if a merge fails.
+    suffix = f"[{video_id}].mp4"
     for f in os.listdir(DOWNLOAD_DIR):
-        if f"[{video_id}]" in f and f.endswith(".mp4"):
+        if f.endswith(suffix):
             return os.path.join(DOWNLOAD_DIR, f)
     return None
 
@@ -304,11 +316,13 @@ def _cleanup_orphan_subs(video_id):
                 pass
 
 
-def download_video(video_id):
+def download_video(video_id, progress_cb=None):
     # --ignore-errors so a failed subtitle fetch (e.g. HTTP 429 on one of
     # several language variants) doesn't abort the actual video download.
-    result = subprocess.run(
-        [YT_DLP, "--ignore-config", "--ignore-errors",
+    # --newline prints progress on its own line (instead of a \r-updated
+    # line) so we can stream it and report percent to the UI.
+    proc = subprocess.Popen(
+        [YT_DLP, "--ignore-config", "--ignore-errors", "--newline",
          "--cookies-from-browser", "safari",
          # Prefer H.264 video + AAC audio so the resulting mp4 plays in
          # QuickTime. yt-dlp's default picks AV1 + Opus by bitrate, which
@@ -318,15 +332,149 @@ def download_video(video_id):
          "--merge-output-format", "mp4",
          "-o", os.path.join(DOWNLOAD_DIR, "%(title)s [%(id)s].%(ext)s"),
          f"https://www.youtube.com/watch?v={video_id}"],
-        capture_output=True, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
-    succeeded = result.returncode == 0 and find_local_file(video_id) is not None
+    output_tail = []
+    for line in proc.stdout:
+        line = line.rstrip()
+        output_tail.append(line)
+        if len(output_tail) > 40:
+            output_tail.pop(0)
+        if progress_cb:
+            m = re.search(r'\[download\]\s+([\d.]+)%', line)
+            if m:
+                try:
+                    progress_cb(float(m.group(1)))
+                except ValueError:
+                    pass
+    proc.wait()
+    succeeded = proc.returncode == 0 and find_local_file(video_id) is not None
     _cleanup_orphan_subs(video_id)
+    output = "\n".join(output_tail)
     if not succeeded:
         print(f"[download] yt-dlp failed for {video_id}")
-        if result.stderr:
-            print(result.stderr.strip()[-2000:])
-    return succeeded
+        print(output)
+    return succeeded, output
+
+
+# ---- Toolchain health & self-repair ----
+#
+# Two failures recur in the wild: yt-dlp goes stale (YouTube changes and old
+# builds start returning HTTP 403 / extractor errors), and ffmpeg's Homebrew
+# dependency dylibs get pruned (e.g. by `brew autoremove`), leaving ffmpeg
+# unable to launch so downloads can't be merged. Both are detectable and
+# repairable via Homebrew, which is what this section does.
+
+CAUSE_YTDLP = "ytdlp"
+CAUSE_FFMPEG = "ffmpeg"
+CAUSE_UNKNOWN = "unknown"
+
+# Row messages shown when a download fails even after an auto-repair attempt.
+_FAIL_MESSAGES = {
+    CAUSE_YTDLP: "yt-dlp couldn't fetch this - click to retry",
+    CAUSE_FFMPEG: "ffmpeg is broken - click to retry",
+    CAUSE_UNKNOWN: "Download failed - click to retry",
+}
+
+# Substrings in yt-dlp output that indicate a stale extractor (fixed by
+# upgrading yt-dlp), as opposed to a genuinely unavailable video.
+_STALE_SIGNS = (
+    "http error 403",
+    "unable to extract",
+    "failed to extract any player response",
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "nsig extraction failed",
+    "unable to download webpage: http error",
+    "requested format is not available",
+)
+
+
+def _brew():
+    for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        if os.path.exists(p):
+            return p
+    return "brew"
+
+
+def _run_brew(args):
+    try:
+        r = subprocess.run(
+            [_brew()] + args, capture_output=True, text=True,
+            env={**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"},
+        )
+    except FileNotFoundError:
+        return False, "brew not found"
+    if r.returncode != 0:
+        print(f"[repair] brew {' '.join(args)} failed:\n{r.stderr.strip()[-1000:]}")
+    return r.returncode == 0, r.stdout + r.stderr
+
+
+def ffmpeg_ok():
+    try:
+        r = subprocess.run([FFMPEG, "-version"], capture_output=True, text=True)
+        return r.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _ffmpeg_missing_formulae():
+    """Homebrew formulae whose dylibs ffmpeg links against but are gone."""
+    ffmpeg_path = shutil.which(FFMPEG)
+    if not ffmpeg_path:
+        return []
+    try:
+        r = subprocess.run(["otool", "-L", ffmpeg_path],
+                           capture_output=True, text=True)
+    except FileNotFoundError:
+        return []
+    formulae = []
+    for line in r.stdout.splitlines():
+        m = re.match(r'\s*(/opt/homebrew/opt/([^/]+)/lib/\S+)', line)
+        if m and not os.path.exists(m.group(1)):
+            formulae.append(m.group(2))
+    return list(dict.fromkeys(formulae))  # dedup, preserve order
+
+
+def repair_ffmpeg():
+    """Reinstall ffmpeg's missing dependency formulae. Returns True if fixed."""
+    missing = _ffmpeg_missing_formulae()
+    if missing:
+        print(f"[repair] Installing missing ffmpeg deps: {', '.join(missing)}")
+        _run_brew(["install"] + missing)
+    return ffmpeg_ok()
+
+
+def ytdlp_age_days():
+    """Age of the installed yt-dlp in days, or None if undeterminable."""
+    try:
+        r = subprocess.run([YT_DLP, "--version"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    parts = r.stdout.strip().split(".")
+    try:
+        released = date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
+    except (ValueError, IndexError):
+        return None
+    return (date.today() - released).days
+
+
+def upgrade_ytdlp():
+    """Upgrade yt-dlp via Homebrew. Returns True on success."""
+    print("[repair] Upgrading yt-dlp")
+    ok, _ = _run_brew(["upgrade", "yt-dlp"])
+    return ok
+
+
+def classify_download_failure(output):
+    if not ffmpeg_ok():
+        return CAUSE_FFMPEG
+    low = output.lower()
+    if "postprocessing" in low and "ffmpeg" in low:
+        return CAUSE_FFMPEG
+    if any(sign in low for sign in _STALE_SIGNS):
+        return CAUSE_YTDLP
+    return CAUSE_UNKNOWN
 
 
 # ---- Video row view ----
@@ -350,6 +498,11 @@ class VideoRowView(NSView):
         title = video["title"]
         duration = _fmt_duration(video["duration"])
         local = find_local_file(vid)
+        # dl-tab rows for a video that is still downloading or has failed have
+        # no file yet and get a spinner / status line instead of a trash button.
+        is_downloading = mode == "dl" and video.get("_downloading")
+        is_failed = mode == "dl" and video.get("_failed")
+        is_pending = is_downloading or is_failed
 
         # Thumbnail
         self._thumb = NSImageView.alloc().initWithFrame_(
@@ -366,6 +519,9 @@ class VideoRowView(NSView):
         # Title — full width by default, shrinks on hover to make room for buttons.
         self._title_full_width = PANEL_WIDTH - 108
         self._title_hover_width = PANEL_WIDTH - 158 if mode == "wl" else PANEL_WIDTH - 130
+        # Pending rows have no hover buttons, so keep the title full width.
+        if is_pending:
+            self._title_hover_width = self._title_full_width
         self._title_label = NSTextField.labelWithString_(title)
         self._title_label.setFrame_(NSMakeRect(78, 32, self._title_full_width, 18))
         self._title_label.setFont_(NSFont.systemFontOfSize_(12.5))
@@ -375,6 +531,8 @@ class VideoRowView(NSView):
 
         # Subtitle
         sub_x = 78
+        sub_text = duration
+        sub_color = NSColor.secondaryLabelColor()
         if mode == "wl" and local:
             # Green checkmark for downloaded indicator on WL tab
             dl_icon = NSImageView.alloc().initWithFrame_(
@@ -388,14 +546,38 @@ class VideoRowView(NSView):
                 dl_icon.setContentTintColor_(NSColor.systemGreenColor())
             self.addSubview_(dl_icon)
             sub_x = 95
+        elif is_downloading:
+            spinner = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect(78, 13, 16, 16)
+            )
+            spinner.setStyle_(NS_PROGRESS_STYLE_SPINNING)
+            spinner.setControlSize_(NS_CONTROL_SIZE_SMALL)
+            spinner.setIndeterminate_(True)
+            spinner.startAnimation_(None)
+            self.addSubview_(spinner)
+            sub_x = 98
+            status_text = video.get("_status_text")
+            if status_text:
+                sub_text = status_text  # e.g. "Repairing ffmpeg..."
+            else:
+                progress = video.get("_progress")
+                sub_text = (
+                    f"Downloading {int(progress)}%" if progress is not None
+                    else "Downloading..."
+                )
+        elif is_failed:
+            sub_text = video.get("_status_text") or "Download failed - click to retry"
+            sub_color = NSColor.systemRedColor()
 
-        self._sub_label = NSTextField.labelWithString_(duration)
+        self._sub_label = NSTextField.labelWithString_(sub_text)
         self._sub_label.setFrame_(NSMakeRect(sub_x, 14, PANEL_WIDTH - 140, 15))
         self._sub_label.setFont_(NSFont.systemFontOfSize_(11))
-        self._sub_label.setTextColor_(NSColor.secondaryLabelColor())
+        self._sub_label.setTextColor_(sub_color)
         self.addSubview_(self._sub_label)
 
-        # Action buttons (hover only)
+        # Action buttons (hover only). Pending (downloading/failed) rows have
+        # no file to act on, so their trash button stays hidden even on hover.
+        self._show_action = not is_pending
         btn_x = PANEL_WIDTH - 38
 
         # Remove/delete button
@@ -475,7 +657,8 @@ class VideoRowView(NSView):
                         )
                         sibling.setNeedsDisplay_(True)
         self._hover = True
-        self._action_btn.setHidden_(False)
+        if self._show_action:
+            self._action_btn.setHidden_(False)
         if self._browser_btn:
             self._browser_btn.setHidden_(False)
         f = self._title_label.frame()
@@ -527,6 +710,9 @@ class WatchLaterApp(NSObject):
         self = objc.super(WatchLaterApp, self).init()
         self._videos = []
         self._set_video_ids = {}
+        # video_id -> {title, duration, progress, status}. Tracks in-flight and
+        # failed downloads so the Downloaded tab can show live status.
+        self._downloading = {}
         self._sort = SORT_DEFAULT
         self._sort_ascending = True
         self._search = ""
@@ -558,11 +744,31 @@ class WatchLaterApp(NSObject):
         self._popover.setAnimates_(True)
 
         threading.Thread(target=self._do_load, daemon=True).start()
+        # Proactively keep the toolchain healthy so the first download works.
+        threading.Thread(target=self._health_check, daemon=True).start()
 
         # Auto-refresh timer
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             AUTO_REFRESH_INTERVAL, self, "autoRefresh:", None, True
         )
+
+    @objc.python_method
+    def _health_check(self):
+        """Runs once at launch. Repairs a broken ffmpeg and refreshes a stale
+        yt-dlp before the user ever clicks download."""
+        try:
+            if not ffmpeg_ok():
+                print("[health] ffmpeg is not runnable; repairing")
+                if repair_ffmpeg():
+                    print("[health] ffmpeg repaired")
+                else:
+                    print("[health] ffmpeg repair did not succeed")
+            age = ytdlp_age_days()
+            if age is not None and age > YTDLP_STALE_DAYS:
+                print(f"[health] yt-dlp is {age} days old; upgrading")
+                upgrade_ytdlp()
+        except Exception as e:
+            print(f"[health] check error: {e}")
 
     def togglePopover_(self, sender):
         if self._popover.isShown():
@@ -588,7 +794,15 @@ class WatchLaterApp(NSObject):
             if not _cookies_are_fresh():
                 extract_cookies()
             self._videos = fetch_playlist()
+        except Exception as e:
+            print(f"[load] playlist error: {e}")
+        # setVideoIds are only needed for removing from Watch Later; a failure
+        # here must not block the list from rendering.
+        try:
             self._set_video_ids = fetch_set_video_ids()
+        except Exception as e:
+            print(f"[load] setVideoIds error: {e}")
+        try:
             threads = []
             for v in self._videos:
                 t = threading.Thread(
@@ -599,8 +813,9 @@ class WatchLaterApp(NSObject):
             for t in threads:
                 t.join(timeout=10)
         except Exception as e:
-            print(f"Load error: {e}")
+            print(f"[load] thumbnail error: {e}")
         self._loading = False
+        print(f"[load] done: {len(self._videos)} videos")
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "postLoadUpdate:", None, False
         )
@@ -626,24 +841,46 @@ class WatchLaterApp(NSObject):
 
     @objc.python_method
     def _get_downloaded_videos(self):
-        """Get all locally downloaded videos."""
-        if not os.path.isdir(DOWNLOAD_DIR):
-            return []
+        """Get all locally downloaded videos, ordered to match Watch Later.
+
+        Downloads still present in Watch Later follow the playlist order;
+        any that are no longer in Watch Later fall to the end (in filesystem
+        order) since they have no playlist position to anchor to.
+        """
+        durations = {v["id"]: v["duration"] for v in self._videos}
+        wl_order = {v["id"]: i for i, v in enumerate(self._videos)}
         downloaded = []
-        for f in os.listdir(DOWNLOAD_DIR):
-            if not f.endswith(".mp4"):
+        seen = set()
+        if os.path.isdir(DOWNLOAD_DIR):
+            for f in os.listdir(DOWNLOAD_DIR):
+                if not f.endswith(".mp4"):
+                    continue
+                m = re.search(r'\[([a-zA-Z0-9_-]{11})\]\.mp4$', f)
+                if m:
+                    vid = m.group(1)
+                    seen.add(vid)
+                    title = f[:f.rfind(" [")]
+                    downloaded.append(
+                        {"id": vid, "title": title,
+                         "duration": durations.get(vid, 0)}
+                    )
+        # In-flight / failed downloads have no file yet; surface them too.
+        for vid, entry in self._downloading.items():
+            if vid in seen:
                 continue
-            m = re.search(r'\[([a-zA-Z0-9_-]{11})\]\.mp4$', f)
-            if m:
-                vid = m.group(1)
-                title = f[:f.rfind(" [")]
-                # Try to get duration from WL data
-                duration = 0
-                for v in self._videos:
-                    if v["id"] == vid:
-                        duration = v["duration"]
-                        break
-                downloaded.append({"id": vid, "title": title, "duration": duration})
+            status = entry.get("status")
+            downloaded.append({
+                "id": vid,
+                "title": entry["title"],
+                "duration": entry.get("duration", 0),
+                # "fixing" shows a spinner too, just with a repair message.
+                "_downloading": status in ("downloading", "fixing"),
+                "_failed": status == "failed",
+                "_progress": entry.get("progress"),
+                "_status_text": entry.get("message"),
+            })
+        # Sort by Watch Later position; non-WL downloads sort after all others.
+        downloaded.sort(key=lambda v: wl_order.get(v["id"], len(wl_order)))
         return downloaded
 
     @objc.python_method
@@ -851,14 +1088,27 @@ class WatchLaterApp(NSObject):
         self._build_content()
 
     def handleVideoClick_(self, video):
-        local = find_local_file(video["id"])
+        vid = video["id"]
+        local = find_local_file(vid)
         if local:
             subprocess.Popen(["open", local])
-        else:
-            self._popover.close()
-            threading.Thread(
-                target=self._do_download, args=(video,), daemon=True
-            ).start()
+            return
+        entry = self._downloading.get(vid)
+        if entry and entry.get("status") in ("downloading", "fixing"):
+            return  # already in flight; ignore repeat clicks
+        # Start (or retry) a download. Switch to the Downloaded tab and keep the
+        # popover open so the user sees the spinner and live progress.
+        self._downloading[vid] = {
+            "title": video["title"],
+            "duration": video.get("duration", 0),
+            "progress": None,
+            "status": "downloading",
+        }
+        self._tab = TAB_DOWNLOADED
+        self._build_content()
+        threading.Thread(
+            target=self._do_download, args=(video,), daemon=True
+        ).start()
 
     def handleOpenInBrowser_(self, video):
         url = f"https://www.youtube.com/watch?v={video['id']}"
@@ -889,13 +1139,71 @@ class WatchLaterApp(NSObject):
         ).start()
 
     @objc.python_method
+    def _set_status(self, vid, status, message=None, progress=None):
+        entry = self._downloading.get(vid)
+        if entry is not None:
+            entry["status"] = status
+            entry["message"] = message
+            entry["progress"] = progress
+        self._request_content_refresh()
+
+    @objc.python_method
+    def _run_download(self, vid):
+        """Run one download attempt, streaming percent into the row."""
+        last_pct = {"v": -1}
+
+        def on_progress(pct):
+            entry = self._downloading.get(vid)
+            if entry is not None:
+                entry["progress"] = pct
+            # Rebuild only on a whole-percent change to avoid thrashing the UI.
+            if int(pct) != last_pct["v"]:
+                last_pct["v"] = int(pct)
+                self._request_content_refresh()
+
+        return download_video(vid, progress_cb=on_progress)
+
+    @objc.python_method
     def _do_download(self, video):
-        if download_video(video["id"]):
-            local = find_local_file(video["id"])
+        vid = video["id"]
+        ok, output = self._run_download(vid)
+
+        # On failure, try a one-shot toolchain repair (upgrade yt-dlp / restore
+        # ffmpeg's deps) and retry the download once before giving up.
+        if not ok:
+            cause = classify_download_failure(output)
+            if cause == CAUSE_YTDLP:
+                self._set_status(vid, "fixing", "Updating yt-dlp...")
+                fixed = upgrade_ytdlp()
+            elif cause == CAUSE_FFMPEG:
+                self._set_status(vid, "fixing", "Repairing ffmpeg...")
+                fixed = repair_ffmpeg()
+            else:
+                fixed = False
+            if fixed:
+                self._set_status(vid, "downloading", None)
+                ok, output = self._run_download(vid)
+
+        if ok:
+            self._downloading.pop(vid, None)
+            self._request_content_refresh()
+            local = find_local_file(vid)
             if local:
                 subprocess.Popen(["open", local])
         else:
-            print(f"[download] Failed: {video['title'][:50]}")
+            cause = classify_download_failure(output)
+            self._set_status(vid, "failed", _FAIL_MESSAGES[cause])
+            print(f"[download] Failed ({cause}): {video['title'][:50]}")
+
+    @objc.python_method
+    def _request_content_refresh(self):
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "refreshContent:", None, False
+        )
+
+    def refreshContent_(self, sender):
+        if self._popover and self._popover.isShown():
+            self._build_content()
 
     @objc.python_method
     def _do_remove_bg(self, video, svid):
