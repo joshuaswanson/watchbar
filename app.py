@@ -317,17 +317,34 @@ def _cleanup_orphan_subs(video_id):
 
 
 def download_video(video_id, progress_cb=None):
+    # Signed-in requests can hit YouTube's SABR-only experiment, which hides
+    # every stream except 360p format 18. Anonymous requests still get the
+    # full format list, so cookies are only used when the anonymous attempt
+    # fails (private, members-only, or age-restricted videos).
+    succeeded, output = _run_download(video_id, [], progress_cb)
+    if not succeeded:
+        succeeded, output = _run_download(
+            video_id, ["--cookies-from-browser", "safari"], progress_cb)
+    _cleanup_orphan_subs(video_id)
+    if not succeeded:
+        print(f"[download] yt-dlp failed for {video_id}")
+        print(output)
+    return succeeded, output
+
+
+def _run_download(video_id, cookie_args, progress_cb):
     # --ignore-errors so a failed subtitle fetch (e.g. HTTP 429 on one of
     # several language variants) doesn't abort the actual video download.
     # --newline prints progress on its own line (instead of a \r-updated
     # line) so we can stream it and report percent to the UI.
     proc = subprocess.Popen(
         [YT_DLP, "--ignore-config", "--ignore-errors", "--newline",
-         "--cookies-from-browser", "safari",
+         *cookie_args,
          # Prefer H.264 video + AAC audio so the resulting mp4 plays in
          # QuickTime. yt-dlp's default picks AV1 + Opus by bitrate, which
          # QuickTime won't decode.
-         "-f", "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/b[ext=mp4]/bv*+ba/b",
+         "-f", "bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]"
+               "/b[ext=mp4][height<=1080]/bv*[height<=1080]+ba/b",
          "--write-auto-subs", "--sub-langs", "en.*", "--embed-subs",
          "--merge-output-format", "mp4",
          "-o", os.path.join(DOWNLOAD_DIR, "%(title)s [%(id)s].%(ext)s"),
@@ -349,12 +366,7 @@ def download_video(video_id, progress_cb=None):
                     pass
     proc.wait()
     succeeded = proc.returncode == 0 and find_local_file(video_id) is not None
-    _cleanup_orphan_subs(video_id)
-    output = "\n".join(output_tail)
-    if not succeeded:
-        print(f"[download] yt-dlp failed for {video_id}")
-        print(output)
-    return succeeded, output
+    return succeeded, "\n".join(output_tail)
 
 
 # ---- Toolchain health & self-repair ----
