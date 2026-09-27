@@ -733,6 +733,8 @@ class WatchLaterApp(NSObject):
         self._popover = None
         self._status_item = None
         self._search_field = None
+        self._scroll_view = None
+        self._scroll_tab = None
         self._search_focused = False
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
@@ -1043,6 +1045,16 @@ class WatchLaterApp(NSObject):
         scroll_view.setHasHorizontalScroller_(False)
         scroll_view.setDrawsBackground_(False)
         scroll_view.setDocumentView_(scroll_content)
+        # The document view is unflipped, so a new scroll view starts at the
+        # bottom of the list. Restore the previous distance from the top.
+        max_offset = content_height - scroll_area_height
+        offset = min(self._scroll_offset_from_top(), max_offset)
+        scroll_view.contentView().scrollToPoint_(
+            NSMakePoint(0, max_offset - offset)
+        )
+        scroll_view.reflectScrolledClipView_(scroll_view.contentView())
+        self._scroll_view = scroll_view
+        self._scroll_tab = self._tab
         container = NSView.alloc().initWithFrame_(
             NSMakeRect(0, 0, PANEL_WIDTH, visible_height)
         )
@@ -1071,6 +1083,14 @@ class WatchLaterApp(NSObject):
                         editor.setSelectedRange_((len(self._search), 0))
                 else:
                     w.makeFirstResponder_(None)
+
+    @objc.python_method
+    def _scroll_offset_from_top(self):
+        if self._scroll_view is None or self._scroll_tab != self._tab:
+            return 0
+        visible = self._scroll_view.contentView().documentVisibleRect()
+        doc_height = self._scroll_view.documentView().frame().size.height
+        return max(0, doc_height - (visible.origin.y + visible.size.height))
 
     def onRefresh_(self, sender):
         if not self._loading:
