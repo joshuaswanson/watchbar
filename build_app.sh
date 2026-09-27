@@ -31,14 +31,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Apps launched from Finder get a minimal PATH without Homebrew, where
-# yt-dlp, ffmpeg, and deno live.
-cat > "$APP/Contents/MacOS/Watchbar" <<EOF
-#!/bin/bash
-export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
-cd "$REPO"
-exec .venv/bin/python -u app.py >> "\$HOME/Library/Logs/Watchbar.log" 2>&1
-EOF
-chmod +x "$APP/Contents/MacOS/Watchbar"
+clang -O2 -DREPO="\"$REPO\"" -o "$APP/Contents/MacOS/Watchbar" launcher.c
+codesign --force --sign - "$APP"
 
 echo "Built $APP"
