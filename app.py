@@ -510,11 +510,12 @@ class VideoRowView(NSView):
         title = video["title"]
         duration = _fmt_duration(video["duration"])
         local = find_local_file(vid)
-        # dl-tab rows for a video that is still downloading or has failed have
-        # no file yet and get a spinner / status line instead of a trash button.
-        is_downloading = mode == "dl" and video.get("_downloading")
-        is_failed = mode == "dl" and video.get("_failed")
-        is_pending = is_downloading or is_failed
+        # Rows for a video that is still downloading or has failed get a
+        # spinner / status line. On the dl tab they have no file yet, so they
+        # also get no trash button.
+        is_downloading = video.get("_downloading")
+        is_failed = video.get("_failed")
+        is_pending = mode == "dl" and (is_downloading or is_failed)
 
         # Thumbnail
         self._thumb = NSImageView.alloc().initWithFrame_(
@@ -850,8 +851,25 @@ class WatchLaterApp(NSObject):
     @objc.python_method
     def _get_visible_videos(self):
         if self._tab == TAB_WATCH_LATER:
-            return self._filtered_sorted(self._videos)
+            return self._filtered_sorted(
+                [self._with_download_status(v) for v in self._videos]
+            )
         return self._filtered_sorted(self._get_downloaded_videos())
+
+    @objc.python_method
+    def _with_download_status(self, video):
+        entry = self._downloading.get(video["id"])
+        if entry is None:
+            return video
+        status = entry.get("status")
+        return {
+            **video,
+            # "fixing" shows a spinner too, just with a repair message.
+            "_downloading": status in ("downloading", "fixing"),
+            "_failed": status == "failed",
+            "_progress": entry.get("progress"),
+            "_status_text": entry.get("message"),
+        }
 
     @objc.python_method
     def _get_downloaded_videos(self):
@@ -882,17 +900,11 @@ class WatchLaterApp(NSObject):
         for vid, entry in self._downloading.items():
             if vid in seen:
                 continue
-            status = entry.get("status")
-            downloaded.append({
+            downloaded.append(self._with_download_status({
                 "id": vid,
                 "title": entry["title"],
                 "duration": entry.get("duration", 0),
-                # "fixing" shows a spinner too, just with a repair message.
-                "_downloading": status in ("downloading", "fixing"),
-                "_failed": status == "failed",
-                "_progress": entry.get("progress"),
-                "_status_text": entry.get("message"),
-            })
+            }))
         # Sort by Watch Later position; non-WL downloads sort after all others.
         downloaded.sort(key=lambda v: wl_order.get(v["id"], len(wl_order)))
         return downloaded
@@ -1128,15 +1140,12 @@ class WatchLaterApp(NSObject):
         entry = self._downloading.get(vid)
         if entry and entry.get("status") in ("downloading", "fixing"):
             return  # already in flight; ignore repeat clicks
-        # Start (or retry) a download. Switch to the Downloaded tab and keep the
-        # popover open so the user sees the spinner and live progress.
         self._downloading[vid] = {
             "title": video["title"],
             "duration": video.get("duration", 0),
             "progress": None,
             "status": "downloading",
         }
-        self._tab = TAB_DOWNLOADED
         self._build_content()
         threading.Thread(
             target=self._do_download, args=(video,), daemon=True
