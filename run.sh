@@ -9,4 +9,4 @@ else
     source .venv/bin/activate
 fi
 
-python3 app.py
+python3 -u app.py
