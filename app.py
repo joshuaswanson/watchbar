@@ -1139,9 +1139,6 @@ class WatchLaterApp(NSObject):
 
     def handleRemove_(self, video):
         svid = self._set_video_ids.get(video["id"])
-        if not svid:
-            print("[remove] Entry not found. Try refreshing.")
-            return
         self._videos = [v for v in self._videos if v["id"] != video["id"]]
         self._set_video_ids.pop(video["id"], None)
         self._update_badge()
@@ -1220,7 +1217,15 @@ class WatchLaterApp(NSObject):
     @objc.python_method
     def _do_remove_bg(self, video, svid):
         try:
-            if not remove_from_watch_later(video["id"], svid):
+            if svid and remove_from_watch_later(video["id"], svid):
+                return
+            # Safari rotates YouTube's session cookies, which logs out the
+            # cached copy before COOKIE_MAX_AGE is reached.
+            extract_cookies()
+            svid = fetch_set_video_ids().get(video["id"])
+            if not svid:
+                print(f"[remove] Entry not found: {video['title'][:50]}")
+            elif not remove_from_watch_later(video["id"], svid):
                 print(f"[remove] Failed: {video['title'][:50]}")
         except Exception as e:
             print(f"[remove] Error: {e}")
