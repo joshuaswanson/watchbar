@@ -224,6 +224,8 @@ def fetch_playlist():
          "https://www.youtube.com/playlist?list=WL"],
         capture_output=True, text=True, timeout=60,
     )
+    if result.returncode != 0:
+        print(f"[load] yt-dlp playlist failed:\n{result.stderr.strip()[-1000:]}")
     videos = []
     for line in result.stdout.strip().split("\n"):
         parts = line.split("\t")
