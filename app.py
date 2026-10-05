@@ -532,7 +532,13 @@ class VideoRowView(NSView):
 
         # Title — full width by default, shrinks on hover to make room for buttons.
         self._title_full_width = PANEL_WIDTH - 108
-        self._title_hover_width = PANEL_WIDTH - 158 if mode == "wl" else PANEL_WIDTH - 130
+        has_download_btn = mode == "wl" and not local and not is_downloading
+        if has_download_btn:
+            self._title_hover_width = PANEL_WIDTH - 186
+        elif mode == "wl":
+            self._title_hover_width = PANEL_WIDTH - 158
+        else:
+            self._title_hover_width = PANEL_WIDTH - 130
         # Pending rows have no hover buttons, so keep the title full width.
         if is_pending:
             self._title_hover_width = self._title_full_width
@@ -624,11 +630,31 @@ class VideoRowView(NSView):
 
         self.addSubview_(self._action_btn)
 
+        # Download-only button (hover only, WL rows without a local file)
+        self._download_btn = None
+        if has_download_btn:
+            self._download_btn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(btn_x - 28, 20, 24, 24)
+            )
+            self._download_btn.setBordered_(False)
+            self._download_btn.setHidden_(True)
+            download_icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "arrow.down.circle", "Download"
+            )
+            if download_icon:
+                self._download_btn.setImage_(download_icon)
+                self._download_btn.setTitle_("")
+            self._download_btn.setToolTip_("Download")
+            self._download_btn.setTarget_(self)
+            self._download_btn.setAction_("onDownload:")
+            self.addSubview_(self._download_btn)
+
         # Open in browser button (hover only, WL tab)
         self._browser_btn = None
         if mode == "wl":
+            browser_x = btn_x - 56 if has_download_btn else btn_x - 28
             self._browser_btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(btn_x - 28, 20, 24, 24)
+                NSMakeRect(browser_x, 20, 24, 24)
             )
             self._browser_btn.setBordered_(False)
             self._browser_btn.setHidden_(True)
@@ -664,6 +690,8 @@ class VideoRowView(NSView):
                         sibling._action_btn.setHidden_(True)
                         if sibling._browser_btn:
                             sibling._browser_btn.setHidden_(True)
+                        if sibling._download_btn:
+                            sibling._download_btn.setHidden_(True)
                         f = sibling._title_label.frame()
                         sibling._title_label.setFrame_(
                             NSMakeRect(f.origin.x, f.origin.y,
@@ -675,6 +703,8 @@ class VideoRowView(NSView):
             self._action_btn.setHidden_(False)
         if self._browser_btn:
             self._browser_btn.setHidden_(False)
+        if self._download_btn:
+            self._download_btn.setHidden_(False)
         f = self._title_label.frame()
         self._title_label.setFrame_(
             NSMakeRect(f.origin.x, f.origin.y, self._title_hover_width, f.size.height)
@@ -686,6 +716,8 @@ class VideoRowView(NSView):
         self._action_btn.setHidden_(True)
         if self._browser_btn:
             self._browser_btn.setHidden_(True)
+        if self._download_btn:
+            self._download_btn.setHidden_(True)
         f = self._title_label.frame()
         self._title_label.setFrame_(
             NSMakeRect(f.origin.x, f.origin.y, self._title_full_width, f.size.height)
@@ -704,6 +736,9 @@ class VideoRowView(NSView):
 
     def onRemove_(self, sender):
         self._app.handleRemove_(self._video)
+
+    def onDownload_(self, sender):
+        self._app.handleDownload_(self._video)
 
     def onDelete_(self, sender):
         self._app.handleDeleteLocal_(self._video)
@@ -1091,6 +1126,15 @@ class WatchLaterApp(NSObject):
         if local:
             subprocess.Popen(["open", local])
             return
+        self._start_download(video, True)
+
+    def handleDownload_(self, video):
+        if not find_local_file(video["id"]):
+            self._start_download(video, False)
+
+    @objc.python_method
+    def _start_download(self, video, play_when_done):
+        vid = video["id"]
         entry = self._downloading.get(vid)
         if entry and entry.get("status") in ("downloading", "fixing"):
             return  # already in flight; ignore repeat clicks
@@ -1102,7 +1146,7 @@ class WatchLaterApp(NSObject):
         }
         self._build_content()
         threading.Thread(
-            target=self._do_download, args=(video,), daemon=True
+            target=self._do_download, args=(video, play_when_done), daemon=True
         ).start()
 
     def handleOpenInBrowser_(self, video):
@@ -1156,7 +1200,7 @@ class WatchLaterApp(NSObject):
         return download_video(vid, progress_cb=on_progress)
 
     @objc.python_method
-    def _do_download(self, video):
+    def _do_download(self, video, play_when_done):
         vid = video["id"]
         ok, output = self._run_download(vid)
 
@@ -1180,7 +1224,7 @@ class WatchLaterApp(NSObject):
             self._downloading.pop(vid, None)
             self._request_content_refresh()
             local = find_local_file(vid)
-            if local:
+            if local and play_when_done:
                 subprocess.Popen(["open", local])
         else:
             cause = classify_download_failure(output)
