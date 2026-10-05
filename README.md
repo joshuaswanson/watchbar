@@ -1,4 +1,6 @@
-# Watchbar
+<h1 align="center">
+  <img src="assets/logo.svg" alt="Watchbar" width="400">
+</h1>
 
 A macOS menubar app for managing your YouTube Watch Later playlist.
 
