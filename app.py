@@ -33,7 +33,6 @@ from AppKit import (
     NSPopUpButton,
     NSProgressIndicator,
     NSScrollView,
-    NSSearchField,
     NSSegmentedControl,
     NSStatusBar,
     NSTextField,
@@ -64,7 +63,7 @@ YTDLP_STALE_DAYS = 30
 PANEL_WIDTH = 380
 PANEL_MAX_HEIGHT = 500
 ROW_HEIGHT = 64
-HEADER_HEIGHT = 108  # search + tabs + refresh/sort
+HEADER_HEIGHT = 74  # tabs + refresh/sort
 
 SORT_DEFAULT = "Default"
 SORT_ALPHA = "Alphabetical"
@@ -730,15 +729,12 @@ class WatchLaterApp(NSObject):
         self._downloading = {}
         self._sort = SORT_DEFAULT
         self._sort_ascending = True
-        self._search = ""
         self._tab = TAB_WATCH_LATER
         self._loading = True
         self._popover = None
         self._status_item = None
-        self._search_field = None
         self._scroll_view = None
         self._scroll_tab = None
-        self._search_focused = False
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
         os.makedirs(THUMB_DIR, exist_ok=True)
@@ -795,10 +791,6 @@ class WatchLaterApp(NSObject):
             self._popover.showRelativeToRect_ofView_preferredEdge_(
                 sender.bounds(), sender, 1
             )
-            if self._search_field:
-                w = self._search_field.window()
-                if w:
-                    w.makeFirstResponder_(None)
 
     def autoRefresh_(self, timer):
         if not self._loading and not self._popover.isShown():
@@ -839,7 +831,7 @@ class WatchLaterApp(NSObject):
 
     def postLoadUpdate_(self, sender):
         self._update_badge()
-        if self._popover and self._popover.isShown() and not self._search:
+        if self._popover and self._popover.isShown():
             self._build_content()
 
     @objc.python_method
@@ -913,9 +905,6 @@ class WatchLaterApp(NSObject):
 
     @objc.python_method
     def _filtered_sorted(self, vids):
-        if self._search:
-            q = self._search.lower()
-            vids = [v for v in vids if q in v["title"].lower()]
         reverse = not self._sort_ascending
         if self._sort == SORT_ALPHA:
             return sorted(vids, key=lambda v: v["title"].lower(), reverse=reverse)
@@ -932,19 +921,7 @@ class WatchLaterApp(NSObject):
             NSMakeRect(0, 0, PANEL_WIDTH, HEADER_HEIGHT)
         )
 
-        # Search bar (top)
-        search_field = NSSearchField.alloc().initWithFrame_(
-            NSMakeRect(10, 74, PANEL_WIDTH - 20, 26)
-        )
-        search_field.setPlaceholderString_("Search videos...")
-        search_field.setFont_(NSFont.systemFontOfSize_(13))
-        search_field.setStringValue_(self._search)
-        search_field.setTarget_(self)
-        search_field.setAction_("onSearch:")
-        header.addSubview_(search_field)
-        self._search_field = search_field
-
-        # Tab bar (middle)
+        # Tab bar (top)
         tabs = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
             ["Watch Later", "Downloaded"], 0, self, "onTabChanged:",
         )
@@ -1017,9 +994,7 @@ class WatchLaterApp(NSObject):
                 rows.append(NSView.alloc().initWithFrame_(
                     NSMakeRect(0, 0, PANEL_WIDTH, 15)
                 ))
-                if self._search:
-                    empty_msg = "No matches"
-                elif self._tab == TAB_WATCH_LATER:
+                if self._tab == TAB_WATCH_LATER:
                     empty_msg = "No videos in Watch Later"
                 else:
                     empty_msg = "No downloaded videos"
@@ -1084,20 +1059,6 @@ class WatchLaterApp(NSObject):
         self._popover.setContentViewController_(vc)
         self._popover.setContentSize_(NSMakeSize(PANEL_WIDTH, visible_height))
 
-        # Restore search field focus if it was active before rebuild;
-        # otherwise actively unfocus so the rebuilt search field doesn't
-        # become first responder by default.
-        if self._search_field:
-            w = self._search_field.window()
-            if w:
-                if self._search_focused:
-                    w.makeFirstResponder_(self._search_field)
-                    editor = self._search_field.currentEditor()
-                    if editor:
-                        editor.setSelectedRange_((len(self._search), 0))
-                else:
-                    w.makeFirstResponder_(None)
-
     @objc.python_method
     def _scroll_offset_from_top(self):
         if self._scroll_view is None or self._scroll_tab != self._tab:
@@ -1111,15 +1072,6 @@ class WatchLaterApp(NSObject):
             self._loading = True
             self._build_content()
             threading.Thread(target=self._do_load, daemon=True).start()
-
-    def onSearch_(self, sender):
-        new_search = sender.stringValue()
-        if new_search == self._search:
-            return
-        self._search = new_search
-        self._search_focused = True
-        self._build_content()
-        self._search_focused = False
 
     def onSortChanged_(self, sender):
         self._sort = sender.titleOfSelectedItem()
