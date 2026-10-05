@@ -23,6 +23,7 @@ from AppKit import (
     NSButton,
     NSColor,
     NSCompositingOperationClear,
+    NSEvent,
     NSFont,
     NSGraphicsContext,
     NSImage,
@@ -86,6 +87,7 @@ NS_BOX_SEPARATOR = 2
 NS_PROGRESS_STYLE_SPINNING = 1
 NS_CONTROL_SIZE_SMALL = 1
 NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY = 1
+NS_EVENT_MASK_LEFT_AND_RIGHT_MOUSE_DOWN = (1 << 1) | (1 << 3)
 # NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
 NS_TRACKING_OPTS = 0x01 | 0x80 | 0x200
 
@@ -790,6 +792,12 @@ class WatchLaterApp(NSObject):
         self._popover = NSPopover.alloc().init()
         self._popover.setBehavior_(NS_POPOVER_BEHAVIOR_TRANSIENT)
         self._popover.setAnimates_(True)
+        # A transient popover only closes on outside clicks while this app is
+        # active, and an accessory app usually is not. The global monitor sees
+        # clicks delivered to other apps.
+        self._click_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NS_EVENT_MASK_LEFT_AND_RIGHT_MOUSE_DOWN, self._close_popover
+        )
 
         threading.Thread(target=self._do_load, daemon=True).start()
         # Proactively keep the toolchain healthy so the first download works.
@@ -799,6 +807,11 @@ class WatchLaterApp(NSObject):
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             AUTO_REFRESH_INTERVAL, self, "autoRefresh:", None, True
         )
+
+    @objc.python_method
+    def _close_popover(self, event):
+        if self._popover.isShown():
+            self._popover.close()
 
     @objc.python_method
     def _health_check(self):
