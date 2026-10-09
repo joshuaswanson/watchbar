@@ -78,6 +78,7 @@ ROW_MODES = {TAB_SUBSCRIPTIONS: "subs", TAB_WATCH_LATER: "wl", TAB_DOWNLOADED: "
 
 SUBSCRIPTIONS_MAX_AGE_DAYS = 8
 SUBSCRIPTIONS_MAX_VIDEOS = 200
+BULK_DOWNLOAD_CONCURRENCY = 3
 
 AUTO_REFRESH_INTERVAL = 300.0  # 5 minutes
 COOKIE_MAX_AGE = 1800  # 30 minutes
@@ -821,6 +822,9 @@ class WatchLaterApp(NSObject):
         # video_id -> {title, duration, progress, status}. Tracks in-flight and
         # failed downloads so the Downloaded tab can show live status.
         self._downloading = {}
+        self._bulk_download_slots = threading.BoundedSemaphore(
+            BULK_DOWNLOAD_CONCURRENCY
+        )
         self._sort = SORT_DEFAULT
         self._sort_ascending = True
         self._tab = TAB_WATCH_LATER
@@ -1059,6 +1063,19 @@ class WatchLaterApp(NSObject):
         refresh_btn.setToolTip_("Refresh")
         header.addSubview_(refresh_btn)
 
+        if self._tab != TAB_DOWNLOADED:
+            download_all_btn = NSButton.buttonWithImage_target_action_(
+                NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    "arrow.down.circle", "Download all"
+                ),
+                self,
+                "onDownloadAll:",
+            )
+            download_all_btn.setFrame_(NSMakeRect(42, 8, 30, 24))
+            download_all_btn.setBordered_(False)
+            download_all_btn.setToolTip_("Download all")
+            header.addSubview_(download_all_btn)
+
         sort_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
             NSMakeRect(PANEL_WIDTH - 145, 8, 105, 24), False
         )
@@ -1215,22 +1232,50 @@ class WatchLaterApp(NSObject):
         if not find_local_file(video["id"]):
             self._start_download(video, False)
 
+    def onDownloadAll_(self, sender):
+        if self._tab == TAB_SUBSCRIPTIONS:
+            videos = self._subscriptions
+        else:
+            videos = self._videos
+        for video in videos:
+            if self._is_in_flight(video["id"]) or find_local_file(video["id"]):
+                continue
+            self._track_download(video, "Queued")
+            threading.Thread(
+                target=self._do_queued_download, args=(video,), daemon=True
+            ).start()
+        self._build_content()
+
     @objc.python_method
-    def _start_download(self, video, play_when_done):
-        vid = video["id"]
+    def _is_in_flight(self, vid):
         entry = self._downloading.get(vid)
-        if entry and entry.get("status") in ("downloading", "fixing"):
-            return  # already in flight; ignore repeat clicks
-        self._downloading[vid] = {
+        return bool(entry) and entry.get("status") in ("downloading", "fixing")
+
+    @objc.python_method
+    def _track_download(self, video, message):
+        self._downloading[video["id"]] = {
             "title": video["title"],
             "duration": video.get("duration", 0),
             "progress": None,
             "status": "downloading",
+            "message": message,
         }
+
+    @objc.python_method
+    def _start_download(self, video, play_when_done):
+        if self._is_in_flight(video["id"]):
+            return  # ignore repeat clicks
+        self._track_download(video, None)
         self._build_content()
         threading.Thread(
             target=self._do_download, args=(video, play_when_done), daemon=True
         ).start()
+
+    @objc.python_method
+    def _do_queued_download(self, video):
+        with self._bulk_download_slots:
+            self._set_status(video["id"], "downloading", None)
+            self._do_download(video, False)
 
     def handleOpenInBrowser_(self, video):
         url = f"https://www.youtube.com/watch?v={video['id']}"
