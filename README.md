@@ -10,7 +10,7 @@ A macOS menubar app for managing your YouTube Watch Later playlist.
 ## Features
 
 - Browse your Watch Later playlist from the menubar with video count badge
-- Sort by alphabetical, duration, or default order with ascending/descending toggle
+- Sort by alphabetical, duration, date published, or default order with ascending/descending toggle
 - Download and play videos locally (no ads, no autoplay), with English captions embedded into the mp4
 - Download every video in Watch Later or the subscriptions feed with one button
 - Open videos in browser
@@ -53,7 +53,7 @@ Once running, a small video icon appears in your menubar with a video count. Cli
 - **Click** a video to download and play locally
 - **Hover** a row to reveal action buttons: open in browser (Safari icon) and remove from Watch Later / delete download (trash icon)
 - Switch between the **Subscriptions**, **Watch Later**, and **Downloaded** tabs to see recent uploads from your subscriptions, your playlist, or local files
-- Use the sort dropdown (Default, Alphabetical, Duration) and the arrow button to change order and direction
+- Use the sort dropdown (Default, Alphabetical, Duration, Date published) and the arrow button to change order and direction
 - Press the refresh button to re-fetch the playlist immediately
 
 ## How it works

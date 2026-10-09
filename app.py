@@ -69,7 +69,8 @@ HEADER_HEIGHT = 74  # tabs + refresh/sort
 SORT_DEFAULT = "Default"
 SORT_ALPHA = "Alphabetical"
 SORT_DURATION = "Duration"
-SORT_OPTIONS = [SORT_DEFAULT, SORT_ALPHA, SORT_DURATION]
+SORT_PUBLISHED = "Date published"
+SORT_OPTIONS = [SORT_DEFAULT, SORT_ALPHA, SORT_DURATION, SORT_PUBLISHED]
 
 TAB_SUBSCRIPTIONS = 0
 TAB_WATCH_LATER = 1
@@ -238,7 +239,11 @@ def extract_cookies():
 def fetch_playlist():
     result = subprocess.run(
         [YT_DLP, "--ignore-config", "--cookies-from-browser", "safari",
-         "--flat-playlist", "--print", "%(id)s\t%(title)s\t%(duration)s",
+         "--flat-playlist",
+         # The playlist only carries relative dates ("3 years ago"); this
+         # option converts them to approximate timestamps.
+         "--extractor-args", "youtubetab:approximate_date",
+         "--print", "%(id)s\t%(title)s\t%(duration)s\t%(timestamp)s",
          "https://www.youtube.com/playlist?list=WL"],
         capture_output=True, text=True, timeout=60,
     )
@@ -255,7 +260,11 @@ def fetch_playlist():
                     duration = int(parts[2])
                 except (ValueError, TypeError):
                     pass
-            videos.append({"id": vid, "title": title, "duration": duration})
+            timestamp = None
+            if len(parts) >= 4 and parts[3].isdigit():
+                timestamp = int(parts[3])
+            videos.append({"id": vid, "title": title, "duration": duration,
+                           "timestamp": timestamp})
     return videos
 
 
@@ -994,6 +1003,10 @@ class WatchLaterApp(NSObject):
         order) since they have no playlist position to anchor to.
         """
         durations = {v["id"]: v["duration"] for v in self._videos}
+        timestamps = {
+            v["id"]: v.get("timestamp")
+            for v in self._subscriptions + self._videos
+        }
         wl_order = {v["id"]: i for i, v in enumerate(self._videos)}
         downloaded = []
         seen = set()
@@ -1008,7 +1021,8 @@ class WatchLaterApp(NSObject):
                     title = f[:f.rfind(" [")]
                     downloaded.append(
                         {"id": vid, "title": title,
-                         "duration": durations.get(vid, 0)}
+                         "duration": durations.get(vid, 0),
+                         "timestamp": timestamps.get(vid)}
                     )
         # In-flight / failed downloads have no file yet; surface them too.
         for vid, entry in self._downloading.items():
@@ -1018,6 +1032,7 @@ class WatchLaterApp(NSObject):
                 "id": vid,
                 "title": entry["title"],
                 "duration": entry.get("duration", 0),
+                "timestamp": timestamps.get(vid),
             }))
         # Sort by Watch Later position; non-WL downloads sort after all others.
         downloaded.sort(key=lambda v: wl_order.get(v["id"], len(wl_order)))
@@ -1030,6 +1045,11 @@ class WatchLaterApp(NSObject):
             return sorted(vids, key=lambda v: v["title"].lower(), reverse=reverse)
         if self._sort == SORT_DURATION:
             return sorted(vids, key=lambda v: v["duration"], reverse=reverse)
+        if self._sort == SORT_PUBLISHED:
+            dated = [v for v in vids if v.get("timestamp") is not None]
+            undated = [v for v in vids if v.get("timestamp") is None]
+            dated.sort(key=lambda v: v["timestamp"], reverse=reverse)
+            return dated + undated
         if reverse:
             return list(reversed(vids))
         return list(vids)
@@ -1077,7 +1097,7 @@ class WatchLaterApp(NSObject):
             header.addSubview_(download_all_btn)
 
         sort_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(PANEL_WIDTH - 145, 8, 105, 24), False
+            NSMakeRect(PANEL_WIDTH - 165, 8, 125, 24), False
         )
         sort_popup.setFont_(NSFont.systemFontOfSize_(12))
         for opt in SORT_OPTIONS:
