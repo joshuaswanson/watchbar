@@ -16,7 +16,8 @@ A macOS menubar app for managing your YouTube Watch Later playlist.
 - Remove videos from Watch Later
 - Auto-refresh every 5 minutes
 - Thumbnails and duration display
-- Tab view for Watch Later and downloaded videos
+- Tab view for subscriptions, Watch Later, and downloaded videos
+- Subscriptions tab with uploads from your subscribed channels over the past week
 
 ## Requirements
 
@@ -50,7 +51,7 @@ Once running, a small video icon appears in your menubar with a video count. Cli
 
 - **Click** a video to download and play locally
 - **Hover** a row to reveal action buttons: open in browser (Safari icon) and remove from Watch Later / delete download (trash icon)
-- Switch between **Watch Later** and **Downloaded** tabs to see your playlist or local files
+- Switch between the **Subscriptions**, **Watch Later**, and **Downloaded** tabs to see recent uploads from your subscriptions, your playlist, or local files
 - Use the sort dropdown (Default, Alphabetical, Duration) and the arrow button to change order and direction
 - Press the refresh button to re-fetch the playlist immediately
 

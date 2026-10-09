@@ -71,8 +71,13 @@ SORT_ALPHA = "Alphabetical"
 SORT_DURATION = "Duration"
 SORT_OPTIONS = [SORT_DEFAULT, SORT_ALPHA, SORT_DURATION]
 
-TAB_WATCH_LATER = 0
-TAB_DOWNLOADED = 1
+TAB_SUBSCRIPTIONS = 0
+TAB_WATCH_LATER = 1
+TAB_DOWNLOADED = 2
+ROW_MODES = {TAB_SUBSCRIPTIONS: "subs", TAB_WATCH_LATER: "wl", TAB_DOWNLOADED: "dl"}
+
+SUBSCRIPTIONS_MAX_AGE_DAYS = 8
+SUBSCRIPTIONS_MAX_VIDEOS = 200
 
 AUTO_REFRESH_INTERVAL = 300.0  # 5 minutes
 COOKIE_MAX_AGE = 1800  # 30 minutes
@@ -151,6 +156,17 @@ def _fmt_duration(seconds):
     if s >= 3600:
         return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
     return f"{s // 60}:{s % 60:02d}"
+
+
+def _fmt_age(timestamp):
+    if timestamp is None:
+        return ""
+    days = int((time.time() - timestamp) // 86400)
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"{days} days ago"
 
 
 def create_menubar_icon():
@@ -239,6 +255,43 @@ def fetch_playlist():
                 except (ValueError, TypeError):
                     pass
             videos.append({"id": vid, "title": title, "duration": duration})
+    return videos
+
+
+def fetch_subscriptions():
+    """Recent uploads from the subscriptions feed, newest first. Returns None
+    when the fetch fails so the caller can keep its previous list."""
+    cutoff = int(time.time()) - SUBSCRIPTIONS_MAX_AGE_DAYS * 86400
+    result = subprocess.run(
+        [YT_DLP, "--ignore-config", "--cookies-from-browser", "safari",
+         "--flat-playlist", "--playlist-end", str(SUBSCRIPTIONS_MAX_VIDEOS),
+         # The feed only carries relative dates ("3 days ago"); this option
+         # converts them to approximate timestamps.
+         "--extractor-args", "youtubetab:approximate_date",
+         # The feed is newest first, so stop at the first video past the
+         # cutoff. ">=?" lets entries without a date (live streams) through.
+         "--break-match-filters", f"timestamp>=?{cutoff}",
+         "--print", "%(id)s\t%(title)s\t%(duration)s\t%(channel)s\t%(timestamp)s",
+         "https://www.youtube.com/feed/subscriptions"],
+        capture_output=True, text=True, timeout=90,
+    )
+    # 101 is yt-dlp's exit code for stopping at --break-match-filters.
+    if result.returncode not in (0, 101):
+        print(f"[load] yt-dlp subscriptions failed:\n{result.stderr.strip()[-1000:]}")
+        return None
+    videos = []
+    for line in result.stdout.strip().split("\n"):
+        parts = line.split("\t")
+        if len(parts) != 5:
+            continue
+        vid, title, duration, channel, timestamp = parts
+        videos.append({
+            "id": vid,
+            "title": title,
+            "duration": int(duration) if duration.isdigit() else 0,
+            "channel": "" if channel == "NA" else channel,
+            "timestamp": int(timestamp) if timestamp.isdigit() else None,
+        })
     return videos
 
 
@@ -506,7 +559,7 @@ class VideoRowView(NSView):
             return None
         self._video = video
         self._app = app
-        self._mode = mode  # "wl" or "dl"
+        self._mode = mode  # "subs", "wl" or "dl"
         self._hover = False
 
         vid = video["id"]
@@ -534,13 +587,11 @@ class VideoRowView(NSView):
 
         # Title — full width by default, shrinks on hover to make room for buttons.
         self._title_full_width = PANEL_WIDTH - 108
-        has_download_btn = mode == "wl" and not local and not is_downloading
-        if has_download_btn:
-            self._title_hover_width = PANEL_WIDTH - 186
-        elif mode == "wl":
-            self._title_hover_width = PANEL_WIDTH - 158
-        else:
-            self._title_hover_width = PANEL_WIDTH - 130
+        has_trash_btn = mode != "subs"
+        has_browser_btn = mode != "dl"
+        has_download_btn = mode != "dl" and not local and not is_downloading
+        button_count = has_trash_btn + has_browser_btn + has_download_btn
+        self._title_hover_width = PANEL_WIDTH - 102 - 28 * button_count
         # Pending rows have no hover buttons, so keep the title full width.
         if is_pending:
             self._title_hover_width = self._title_full_width
@@ -554,9 +605,13 @@ class VideoRowView(NSView):
         # Subtitle
         sub_x = 78
         sub_text = duration
+        if mode == "subs":
+            sub_text = " · ".join(filter(None, [
+                video.get("channel"), duration, _fmt_age(video.get("timestamp")),
+            ]))
         sub_color = NSColor.secondaryLabelColor()
-        if mode == "wl" and local:
-            # Green checkmark for downloaded indicator on WL tab
+        if mode != "dl" and local:
+            # Green checkmark for downloaded indicator on the subs and WL tabs
             dl_icon = NSImageView.alloc().initWithFrame_(
                 NSMakeRect(78, 14, 14, 14)
             )
@@ -599,8 +654,9 @@ class VideoRowView(NSView):
 
         # Action buttons (hover only). Pending (downloading/failed) rows have
         # no file to act on, so their trash button stays hidden even on hover.
-        self._show_action = not is_pending
+        self._show_action = has_trash_btn and not is_pending
         btn_x = PANEL_WIDTH - 38
+        next_btn_x = btn_x - 28 if has_trash_btn else btn_x
 
         # Remove/delete button
         self._action_btn = NSButton.alloc().initWithFrame_(
@@ -632,12 +688,13 @@ class VideoRowView(NSView):
 
         self.addSubview_(self._action_btn)
 
-        # Download-only button (hover only, WL rows without a local file)
+        # Download-only button (hover only, rows without a local file)
         self._download_btn = None
         if has_download_btn:
             self._download_btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(btn_x - 28, 20, 24, 24)
+                NSMakeRect(next_btn_x, 20, 24, 24)
             )
+            next_btn_x -= 28
             self._download_btn.setBordered_(False)
             self._download_btn.setHidden_(True)
             download_icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
@@ -651,12 +708,11 @@ class VideoRowView(NSView):
             self._download_btn.setAction_("onDownload:")
             self.addSubview_(self._download_btn)
 
-        # Open in browser button (hover only, WL tab)
+        # Open in browser button (hover only, subs and WL tabs)
         self._browser_btn = None
-        if mode == "wl":
-            browser_x = btn_x - 56 if has_download_btn else btn_x - 28
+        if has_browser_btn:
             self._browser_btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(browser_x, 20, 24, 24)
+                NSMakeRect(next_btn_x, 20, 24, 24)
             )
             self._browser_btn.setBordered_(False)
             self._browser_btn.setHidden_(True)
@@ -760,6 +816,7 @@ class WatchLaterApp(NSObject):
     def init(self):
         self = objc.super(WatchLaterApp, self).init()
         self._videos = []
+        self._subscriptions = []
         self._set_video_ids = {}
         # video_id -> {title, duration, progress, status}. Tracks in-flight and
         # failed downloads so the Downloaded tab can show live status.
@@ -860,8 +917,14 @@ class WatchLaterApp(NSObject):
         except Exception as e:
             print(f"[load] setVideoIds error: {e}")
         try:
+            subscriptions = fetch_subscriptions()
+            if subscriptions is not None:
+                self._subscriptions = subscriptions
+        except Exception as e:
+            print(f"[load] subscriptions error: {e}")
+        try:
             threads = []
-            for v in self._videos:
+            for v in self._videos + self._subscriptions:
                 t = threading.Thread(
                     target=download_thumbnail, args=(v["id"],), daemon=True
                 )
@@ -872,7 +935,8 @@ class WatchLaterApp(NSObject):
         except Exception as e:
             print(f"[load] thumbnail error: {e}")
         self._loading = False
-        print(f"[load] done: {len(self._videos)} videos")
+        print(f"[load] done: {len(self._videos)} videos, "
+              f"{len(self._subscriptions)} subscription uploads")
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "postLoadUpdate:", None, False
         )
@@ -892,6 +956,10 @@ class WatchLaterApp(NSObject):
 
     @objc.python_method
     def _get_visible_videos(self):
+        if self._tab == TAB_SUBSCRIPTIONS:
+            return self._filtered_sorted(
+                [self._with_download_status(v) for v in self._subscriptions]
+            )
         if self._tab == TAB_WATCH_LATER:
             return self._filtered_sorted(
                 [self._with_download_status(v) for v in self._videos]
@@ -971,7 +1039,7 @@ class WatchLaterApp(NSObject):
 
         # Tab bar (top)
         tabs = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
-            ["Watch Later", "Downloaded"], 0, self, "onTabChanged:",
+            ["Subscriptions", "Watch Later", "Downloaded"], 0, self, "onTabChanged:",
         )
         tabs.setFrame_(NSMakeRect(10, 40, PANEL_WIDTH - 20, 26))
         tabs.setSelectedSegment_(self._tab)
@@ -1036,13 +1104,15 @@ class WatchLaterApp(NSObject):
             label.setTextColor_(NSColor.secondaryLabelColor())
             rows.append(label)
         else:
-            mode = "wl" if self._tab == TAB_WATCH_LATER else "dl"
+            mode = ROW_MODES[self._tab]
             vids = self._get_visible_videos()
             if not vids:
                 rows.append(NSView.alloc().initWithFrame_(
                     NSMakeRect(0, 0, PANEL_WIDTH, 15)
                 ))
-                if self._tab == TAB_WATCH_LATER:
+                if self._tab == TAB_SUBSCRIPTIONS:
+                    empty_msg = "No recent uploads from your subscriptions"
+                elif self._tab == TAB_WATCH_LATER:
                     empty_msg = "No videos in Watch Later"
                 else:
                     empty_msg = "No downloaded videos"
