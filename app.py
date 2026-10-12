@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import ssl
+import struct
 import subprocess
 import threading
 import time
@@ -156,6 +157,41 @@ def _fmt_duration(seconds):
     if s >= 3600:
         return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
     return f"{s // 60}:{s % 60:02d}"
+
+
+def _mp4_duration(path):
+    """Length in seconds from the file's movie header, 0 when unreadable."""
+    try:
+        with open(path, "rb") as f:
+            end = os.path.getsize(path)
+            while f.tell() < end:
+                start = f.tell()
+                header = f.read(8)
+                if len(header) < 8:
+                    return 0
+                size, kind = struct.unpack(">I4s", header)
+                if size == 1:
+                    size = struct.unpack(">Q", f.read(8))[0]
+                elif size == 0:
+                    size = end - start
+                if kind == b"moov":
+                    end = start + size
+                    continue
+                if kind == b"mvhd":
+                    version = f.read(4)[0]
+                    if version == 1:
+                        f.seek(16, os.SEEK_CUR)
+                        timescale, units = struct.unpack(">IQ", f.read(12))
+                    else:
+                        f.seek(8, os.SEEK_CUR)
+                        timescale, units = struct.unpack(">II", f.read(8))
+                    return units // timescale if timescale else 0
+                if size < 8:
+                    return 0
+                f.seek(start + size)
+    except (OSError, struct.error, IndexError):
+        pass
+    return 0
 
 
 def _fmt_age(timestamp):
@@ -828,6 +864,7 @@ class WatchLaterApp(NSObject):
         self = objc.super(WatchLaterApp, self).init()
         self._videos = []
         self._subscriptions = []
+        self._file_durations = {}
         self._set_video_ids = {}
         # video_id -> {title, duration, progress, status}. Tracks in-flight and
         # failed downloads so the Downloaded tab can show live status.
@@ -996,6 +1033,12 @@ class WatchLaterApp(NSObject):
         }
 
     @objc.python_method
+    def _file_duration(self, path):
+        if path not in self._file_durations:
+            self._file_durations[path] = _mp4_duration(path)
+        return self._file_durations[path]
+
+    @objc.python_method
     def _get_downloaded_videos(self):
         """Get all locally downloaded videos, ordered to match Watch Later.
 
@@ -1003,7 +1046,9 @@ class WatchLaterApp(NSObject):
         any that are no longer in Watch Later fall to the end (in filesystem
         order) since they have no playlist position to anchor to.
         """
-        durations = {v["id"]: v["duration"] for v in self._videos}
+        durations = {
+            v["id"]: v["duration"] for v in self._subscriptions + self._videos
+        }
         timestamps = {
             v["id"]: v.get("timestamp")
             for v in self._subscriptions + self._videos
@@ -1020,9 +1065,12 @@ class WatchLaterApp(NSObject):
                     vid = m.group(1)
                     seen.add(vid)
                     title = f[:f.rfind(" [")]
+                    duration = durations.get(vid) or self._file_duration(
+                        os.path.join(DOWNLOAD_DIR, f)
+                    )
                     downloaded.append(
                         {"id": vid, "title": title,
-                         "duration": durations.get(vid, 0),
+                         "duration": duration,
                          "timestamp": timestamps.get(vid)}
                     )
         # In-flight / failed downloads have no file yet; surface them too.
