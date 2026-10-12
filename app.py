@@ -22,10 +22,8 @@ from AppKit import (
     NSBox,
     NSButton,
     NSColor,
-    NSCompositingOperationClear,
     NSEvent,
     NSFont,
-    NSGraphicsContext,
     NSImage,
     NSImageScaleProportionallyUpOrDown,
     NSImageView,
@@ -54,7 +52,7 @@ DOWNLOAD_DIR = os.path.join(_PROJECT_DIR, "downloads")
 CACHE_DIR = os.path.join(_PROJECT_DIR, ".cache")
 COOKIE_FILE = os.path.join(CACHE_DIR, "cookies.txt")
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbnails")
-ICON_PATH = os.path.join(CACHE_DIR, "yt_icon.png")
+ICON_PATH = os.path.join(CACHE_DIR, "menubar_icon.png")
 YT_DLP = "yt-dlp"
 FFMPEG = "ffmpeg"
 # yt-dlp older than this is proactively refreshed on launch. YouTube breaks
@@ -179,20 +177,23 @@ def create_menubar_icon():
     size = 18
     img = NSImage.alloc().initWithSize_((size, size))
     img.lockFocus()
-    rect_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        ((1, 3), (16, 12)), 3, 3
+    NSColor.blackColor().set()
+    case = NSBezierPath.bezierPathWithOvalInRect_(((2.8, 1.8), (12.4, 12.4)))
+    case.setLineWidth_(1.6)
+    case.stroke()
+    crown = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        ((7.7, 14.6), (2.6, 2.4)), 0.6, 0.6
     )
-    NSColor.blackColor().setFill()
-    rect_path.fill()
+    crown.fill()
     tri = NSBezierPath.bezierPath()
-    tri.moveToPoint_((7, 5))
-    tri.lineToPoint_((7, 13))
-    tri.lineToPoint_((13, 9))
+    tri.moveToPoint_((7.4, 5.3))
+    tri.lineToPoint_((7.4, 10.7))
+    tri.lineToPoint_((12.0, 8.0))
     tri.closePath()
-    NSGraphicsContext.currentContext().setCompositingOperation_(
-        NSCompositingOperationClear
-    )
+    tri.setLineJoinStyle_(1)
+    tri.setLineWidth_(1.0)
     tri.fill()
+    tri.stroke()
     img.unlockFocus()
 
     tiff = img.TIFFRepresentation()
