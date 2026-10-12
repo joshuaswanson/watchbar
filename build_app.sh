@@ -10,7 +10,8 @@ if [ ! -d .venv ]; then
 fi
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp assets/Watchbar.icns "$APP/Contents/Resources/Watchbar.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -22,6 +23,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleIdentifier</key>
     <string>com.joshuaswanson.watchbar</string>
     <key>CFBundleExecutable</key>
+    <string>Watchbar</string>
+    <key>CFBundleIconFile</key>
     <string>Watchbar</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
