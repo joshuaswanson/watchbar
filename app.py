@@ -656,10 +656,9 @@ class VideoRowView(NSView):
 
         # Title — full width by default, shrinks on hover to make room for buttons.
         self._title_full_width = PANEL_WIDTH - 108
-        has_trash_btn = mode != "subs"
         has_browser_btn = mode != "dl"
         has_download_btn = mode != "dl" and not local and not is_downloading
-        button_count = has_trash_btn + has_browser_btn + has_download_btn
+        button_count = 1 + has_browser_btn + has_download_btn
         self._title_hover_width = PANEL_WIDTH - 102 - 28 * button_count
         # Pending rows have no hover buttons, so keep the title full width.
         if is_pending:
@@ -723,18 +722,31 @@ class VideoRowView(NSView):
 
         # Action buttons (hover only). Pending (downloading/failed) rows have
         # no file to act on, so their trash button stays hidden even on hover.
-        self._show_action = has_trash_btn and not is_pending
+        self._show_action = not is_pending
         btn_x = PANEL_WIDTH - 38
-        next_btn_x = btn_x - 28 if has_trash_btn else btn_x
+        next_btn_x = btn_x - 28
 
-        # Remove/delete button
+        # Add to Watch Later on the subs tab, remove/delete elsewhere
         self._action_btn = NSButton.alloc().initWithFrame_(
             NSMakeRect(btn_x, 20, 24, 24)
         )
         self._action_btn.setBordered_(False)
         self._action_btn.setHidden_(True)
 
-        if mode == "wl":
+        if mode == "subs":
+            in_wl = video.get("_in_wl")
+            tip = "In Watch Later" if in_wl else "Add to Watch Later"
+            icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "checkmark.circle" if in_wl else "plus.circle", tip
+            )
+            if icon:
+                self._action_btn.setImage_(icon)
+                self._action_btn.setTitle_("")
+            self._action_btn.setToolTip_(tip)
+            self._action_btn.setEnabled_(not in_wl)
+            self._action_btn.setTarget_(self)
+            self._action_btn.setAction_("onAddToWatchLater:")
+        elif mode == "wl":
             icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
                 "trash", "Remove from Watch Later"
             )
@@ -866,6 +878,9 @@ class VideoRowView(NSView):
 
     def onDownload_(self, sender):
         self._app.handleDownload_(self._video)
+
+    def onAddToWatchLater_(self, sender):
+        self._app.handleAddToWatchLater_(self._video)
 
     def onDelete_(self, sender):
         self._app.handleDeleteLocal_(self._video)
@@ -1031,9 +1046,11 @@ class WatchLaterApp(NSObject):
     @objc.python_method
     def _get_visible_videos(self):
         if self._tab == TAB_SUBSCRIPTIONS:
-            return self._filtered_sorted(
-                [self._with_download_status(v) for v in self._subscriptions]
-            )
+            wl_ids = {v["id"] for v in self._videos}
+            return self._filtered_sorted([
+                {**self._with_download_status(v), "_in_wl": v["id"] in wl_ids}
+                for v in self._subscriptions
+            ])
         if self._tab == TAB_WATCH_LATER:
             return self._filtered_sorted(
                 [self._with_download_status(v) for v in self._videos]
@@ -1313,6 +1330,10 @@ class WatchLaterApp(NSObject):
             subprocess.Popen(["open", local])
             return
         self._start_download(video, True)
+
+    def handleAddToWatchLater_(self, video):
+        self._ensure_in_watch_later(video)
+        self._build_content()
 
     def handleDownload_(self, video):
         if not find_local_file(video["id"]):
