@@ -1184,7 +1184,7 @@ class WatchLaterApp(NSObject):
         refresh_btn.setToolTip_("Refresh")
         header.addSubview_(refresh_btn)
 
-        if self._tab != TAB_DOWNLOADED:
+        if self._tab == TAB_WATCH_LATER:
             download_all_btn = NSButton.buttonWithImage_target_action_(
                 NSImage.imageWithSystemSymbolName_accessibilityDescription_(
                     "arrow.down.circle", "Download all"
@@ -1361,11 +1361,7 @@ class WatchLaterApp(NSObject):
             self._start_download(video, False)
 
     def onDownloadAll_(self, sender):
-        if self._tab == TAB_SUBSCRIPTIONS:
-            videos = self._subscriptions
-        else:
-            videos = self._videos
-        for video in videos:
+        for video in self._videos:
             if self._is_in_flight(video["id"]) or find_local_file(video["id"]):
                 continue
             self._ensure_in_watch_later(video)
