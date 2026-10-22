@@ -408,6 +408,18 @@ def _edit_watch_later(action, log_tag):
     return status == "STATUS_SUCCEEDED"
 
 
+def local_files():
+    """Map video id to the final merged mp4 for every download."""
+    if not os.path.isdir(DOWNLOAD_DIR):
+        return {}
+    files = {}
+    for f in os.listdir(DOWNLOAD_DIR):
+        m = re.search(r'\[([a-zA-Z0-9_-]{11})\]\.mp4$', f)
+        if m:
+            files[m.group(1)] = os.path.join(DOWNLOAD_DIR, f)
+    return files
+
+
 def find_local_file(video_id):
     if not os.path.isdir(DOWNLOAD_DIR):
         return None
@@ -634,7 +646,7 @@ class VideoRowView(NSView):
         vid = video["id"]
         title = video["title"]
         duration = _fmt_duration(video["duration"])
-        local = find_local_file(vid)
+        local = app._local_files.get(vid)
         # Rows for a video that is still downloading or has failed get a
         # spinner / status line. On the dl tab they have no file yet, so they
         # also get no trash button.
@@ -646,12 +658,10 @@ class VideoRowView(NSView):
         self._thumb = NSImageView.alloc().initWithFrame_(
             NSMakeRect(10, 12, 60, 40)
         )
-        thumb_path = os.path.join(THUMB_DIR, f"{vid}.jpg")
-        if os.path.exists(thumb_path):
-            img = NSImage.alloc().initWithContentsOfFile_(thumb_path)
-            if img:
-                self._thumb.setImage_(img)
-                self._thumb.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+        img = app._thumbnail(vid)
+        if img:
+            self._thumb.setImage_(img)
+            self._thumb.setImageScaling_(NSImageScaleProportionallyUpOrDown)
         self.addSubview_(self._thumb)
 
         # Title — full width by default, shrinks on hover to make room for buttons.
@@ -879,6 +889,10 @@ class VideoRowView(NSView):
     def onDownload_(self, sender):
         self._app.handleDownload_(self._video)
 
+    @objc.python_method
+    def set_sub_text(self, text):
+        self._sub_label.setStringValue_(text)
+
     def onAddToWatchLater_(self, sender):
         self._app.handleAddToWatchLater_(self._video)
 
@@ -907,6 +921,10 @@ class WatchLaterApp(NSObject):
         # failed downloads so the Downloaded tab can show live status.
         self._downloading = {}
         self._removed_ids = set()
+        self._local_files = {}
+        self._thumbnails = {}
+        self._rows_by_id = {}
+        self._refresh_pending = False
         self._bulk_download_slots = threading.BoundedSemaphore(
             BULK_DOWNLOAD_CONCURRENCY
         )
@@ -1225,6 +1243,8 @@ class WatchLaterApp(NSObject):
             rows.append(label)
         else:
             mode = ROW_MODES[self._tab]
+            self._local_files = local_files()
+            self._rows_by_id = {}
             vids = self._get_visible_videos()
             if not vids:
                 rows.append(NSView.alloc().initWithFrame_(
@@ -1247,6 +1267,7 @@ class WatchLaterApp(NSObject):
                     row = VideoRowView.alloc().initWithVideo_app_mode_(
                         v, self, mode
                     )
+                    self._rows_by_id[v["id"]] = row
                     rows.append(row)
 
         # Layout - fixed height to avoid jarring resizes on tab switch
@@ -1461,10 +1482,11 @@ class WatchLaterApp(NSObject):
             entry = self._downloading.get(vid)
             if entry is not None:
                 entry["progress"] = pct
-            # Rebuild only on a whole-percent change to avoid thrashing the UI.
             if int(pct) != last_pct["v"]:
                 last_pct["v"] = int(pct)
-                self._request_content_refresh()
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "updateProgress:", vid, False
+                )
 
         return download_video(vid, progress_cb=on_progress)
 
@@ -1504,12 +1526,41 @@ class WatchLaterApp(NSObject):
             print(f"[download] Failed ({cause}): {video['title'][:50]}")
 
     @objc.python_method
+    def _thumbnail(self, vid):
+        img = self._thumbnails.get(vid)
+        if img is None:
+            path = os.path.join(THUMB_DIR, f"{vid}.jpg")
+            if os.path.exists(path):
+                img = NSImage.alloc().initWithContentsOfFile_(path)
+                if img:
+                    self._thumbnails[vid] = img
+        return img
+
+    def updateProgress_(self, vid):
+        """Update one row's progress text without rebuilding the list."""
+        row = self._rows_by_id.get(vid)
+        entry = self._downloading.get(vid)
+        if row is None or entry is None or entry.get("status") != "downloading":
+            return
+        progress = entry.get("progress")
+        if entry.get("message"):
+            row.set_sub_text(entry["message"])
+        elif progress is not None:
+            row.set_sub_text(f"Downloading {int(progress)}%")
+
+    @objc.python_method
     def _request_content_refresh(self):
+        # Status changes from several download threads collapse into one
+        # rebuild per main loop pass.
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "refreshContent:", None, False
         )
 
     def refreshContent_(self, sender):
+        self._refresh_pending = False
         if self._popover and self._popover.isShown():
             self._build_content()
 
