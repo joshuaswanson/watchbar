@@ -351,12 +351,14 @@ def fetch_set_video_ids():
     resp = urllib.request.urlopen(req, context=_ssl_ctx(), timeout=20)
     page = resp.read().decode("utf-8")
     mappings = {}
-    for m in re.finditer(r'"playlistVideoRenderer":\{"videoId":"([^"]+)"', page):
-        vid = m.group(1)
-        chunk = page[m.start():m.start() + 5000]
+    renderers = list(
+        re.finditer(r'"playlistVideoRenderer":\{"videoId":"([^"]+)"', page)
+    )
+    for m, following in zip(renderers, renderers[1:] + [None]):
+        chunk = page[m.start():following.start() if following else len(page)]
         svid_match = re.search(r'"setVideoId":"([^"]+)"', chunk)
         if svid_match:
-            mappings[vid] = svid_match.group(1)
+            mappings[m.group(1)] = svid_match.group(1)
     return mappings
 
 
