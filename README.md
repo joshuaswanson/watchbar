@@ -14,7 +14,8 @@ A macOS menubar app for managing your YouTube Watch Later playlist.
 - Download and play videos locally (no ads, no autoplay), with English captions embedded into the mp4
 - Download every video in Watch Later or the subscriptions feed with one button
 - Open videos in browser
-- Remove videos from Watch Later
+- Remove videos from Watch Later, which also deletes their downloaded files
+- The Downloaded tab only lists Watch Later videos. Downloading a subscriptions video saves it to Watch Later.
 - Auto-refresh every 5 minutes
 - Thumbnails and duration display
 - Tab view for subscriptions, Watch Later, and downloaded videos

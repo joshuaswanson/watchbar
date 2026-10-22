@@ -361,17 +361,27 @@ def fetch_set_video_ids():
 
 
 def remove_from_watch_later(video_id, set_video_id):
+    return _edit_watch_later({
+        "setVideoId": set_video_id,
+        "removedVideoId": video_id,
+        "action": "ACTION_REMOVE_VIDEO",
+    }, "remove")
+
+
+def add_to_watch_later(video_id):
+    return _edit_watch_later(
+        {"addedVideoId": video_id, "action": "ACTION_ADD_VIDEO"}, "add"
+    )
+
+
+def _edit_watch_later(action, log_tag):
     cookies = _load_cookies()
     cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
     payload = json.dumps({
         "context": {
             "client": {"clientName": "WEB", "clientVersion": _get_client_version()}
         },
-        "actions": [{
-            "setVideoId": set_video_id,
-            "removedVideoId": video_id,
-            "action": "ACTION_REMOVE_VIDEO",
-        }],
+        "actions": [action],
         "playlistId": "WL",
     }).encode()
     req = urllib.request.Request(
@@ -388,13 +398,13 @@ def remove_from_watch_later(video_id, set_video_id):
         resp = urllib.request.urlopen(req, context=_ssl_ctx(), timeout=20)
         body = resp.read().decode()
     except urllib.error.HTTPError as e:
-        print(f"[remove] HTTP {e.code}: {e.read().decode()[:500]}")
+        print(f"[{log_tag}] HTTP {e.code}: {e.read().decode()[:500]}")
         return False
     result = json.loads(body)
     status = result.get("status")
     if status != "STATUS_SUCCEEDED":
-        print(f"[remove] Unexpected status: {status}")
-        print(f"[remove] Response: {json.dumps(result, indent=2)[:1000]}")
+        print(f"[{log_tag}] Unexpected status: {status}")
+        print(f"[{log_tag}] Response: {json.dumps(result, indent=2)[:1000]}")
     return status == "STATUS_SUCCEEDED"
 
 
@@ -408,6 +418,18 @@ def find_local_file(video_id):
         if f.endswith(suffix):
             return os.path.join(DOWNLOAD_DIR, f)
     return None
+
+
+def delete_local_files(video_id):
+    """Delete the video and every leftover file yt-dlp wrote for it."""
+    if not os.path.isdir(DOWNLOAD_DIR):
+        return
+    for f in os.listdir(DOWNLOAD_DIR):
+        if f"[{video_id}]" in f:
+            try:
+                os.remove(os.path.join(DOWNLOAD_DIR, f))
+            except OSError:
+                pass
 
 
 def _cleanup_orphan_subs(video_id):
@@ -869,6 +891,7 @@ class WatchLaterApp(NSObject):
         # video_id -> {title, duration, progress, status}. Tracks in-flight and
         # failed downloads so the Downloaded tab can show live status.
         self._downloading = {}
+        self._removed_ids = set()
         self._bulk_download_slots = threading.BoundedSemaphore(
             BULK_DOWNLOAD_CONCURRENCY
         )
@@ -1040,12 +1063,7 @@ class WatchLaterApp(NSObject):
 
     @objc.python_method
     def _get_downloaded_videos(self):
-        """Get all locally downloaded videos, ordered to match Watch Later.
-
-        Downloads still present in Watch Later follow the playlist order;
-        any that are no longer in Watch Later fall to the end (in filesystem
-        order) since they have no playlist position to anchor to.
-        """
+        """Downloaded and in-flight Watch Later videos, in playlist order."""
         durations = {
             v["id"]: v["duration"] for v in self._subscriptions + self._videos
         }
@@ -1061,7 +1079,7 @@ class WatchLaterApp(NSObject):
                 if not f.endswith(".mp4"):
                     continue
                 m = re.search(r'\[([a-zA-Z0-9_-]{11})\]\.mp4$', f)
-                if m:
+                if m and m.group(1) in wl_order:
                     vid = m.group(1)
                     seen.add(vid)
                     title = f[:f.rfind(" [")]
@@ -1075,7 +1093,7 @@ class WatchLaterApp(NSObject):
                     )
         # In-flight / failed downloads have no file yet; surface them too.
         for vid, entry in self._downloading.items():
-            if vid in seen:
+            if vid in seen or vid not in wl_order:
                 continue
             downloaded.append(self._with_download_status({
                 "id": vid,
@@ -1083,8 +1101,7 @@ class WatchLaterApp(NSObject):
                 "duration": entry.get("duration", 0),
                 "timestamp": timestamps.get(vid),
             }))
-        # Sort by Watch Later position; non-WL downloads sort after all others.
-        downloaded.sort(key=lambda v: wl_order.get(v["id"], len(wl_order)))
+        downloaded.sort(key=lambda v: wl_order[v["id"]])
         return downloaded
 
     @objc.python_method
@@ -1309,6 +1326,7 @@ class WatchLaterApp(NSObject):
         for video in videos:
             if self._is_in_flight(video["id"]) or find_local_file(video["id"]):
                 continue
+            self._ensure_in_watch_later(video)
             self._track_download(video, "Queued")
             threading.Thread(
                 target=self._do_queued_download, args=(video,), daemon=True
@@ -1334,6 +1352,7 @@ class WatchLaterApp(NSObject):
     def _start_download(self, video, play_when_done):
         if self._is_in_flight(video["id"]):
             return  # ignore repeat clicks
+        self._ensure_in_watch_later(video)
         self._track_download(video, None)
         self._build_content()
         threading.Thread(
@@ -1341,8 +1360,41 @@ class WatchLaterApp(NSObject):
         ).start()
 
     @objc.python_method
+    def _ensure_in_watch_later(self, video):
+        """Downloads must stay a subset of Watch Later, so downloading a
+        Subscriptions video saves it to Watch Later first."""
+        self._removed_ids.discard(video["id"])
+        if any(v["id"] == video["id"] for v in self._videos):
+            return
+        self._videos.append({
+            "id": video["id"],
+            "title": video["title"],
+            "duration": video.get("duration", 0),
+            "timestamp": video.get("timestamp"),
+        })
+        self._update_badge()
+        threading.Thread(
+            target=self._do_add_bg, args=(video,), daemon=True
+        ).start()
+
+    @objc.python_method
+    def _do_add_bg(self, video):
+        try:
+            if add_to_watch_later(video["id"]):
+                return
+            extract_cookies()
+            if not add_to_watch_later(video["id"]):
+                print(f"[add] Failed: {video['title'][:50]}")
+        except Exception as e:
+            print(f"[add] Error: {e}")
+
+    @objc.python_method
     def _do_queued_download(self, video):
         with self._bulk_download_slots:
+            if video["id"] in self._removed_ids:
+                self._downloading.pop(video["id"], None)
+                self._request_content_refresh()
+                return
             self._set_status(video["id"], "downloading", None)
             self._do_download(video, False)
 
@@ -1352,17 +1404,16 @@ class WatchLaterApp(NSObject):
         self._popover.close()
 
     def handleDeleteLocal_(self, video):
-        local = find_local_file(video["id"])
-        if local:
-            os.remove(local)
-            base = os.path.splitext(os.path.basename(local))[0]
-            for f in os.listdir(DOWNLOAD_DIR):
-                if f.startswith(base) and f != os.path.basename(local):
-                    os.remove(os.path.join(DOWNLOAD_DIR, f))
-            self._build_content()
+        delete_local_files(video["id"])
+        self._build_content()
 
     def handleRemove_(self, video):
         svid = self._set_video_ids.get(video["id"])
+        if self._is_in_flight(video["id"]):
+            self._removed_ids.add(video["id"])
+        else:
+            self._downloading.pop(video["id"], None)
+            delete_local_files(video["id"])
         self._videos = [v for v in self._videos if v["id"] != video["id"]]
         self._set_video_ids.pop(video["id"], None)
         self._update_badge()
@@ -1420,6 +1471,9 @@ class WatchLaterApp(NSObject):
         if ok:
             self._downloading.pop(vid, None)
             self._request_content_refresh()
+            if vid in self._removed_ids:
+                delete_local_files(vid)
+                return
             local = find_local_file(vid)
             if local and play_when_done:
                 subprocess.Popen(["open", local])
